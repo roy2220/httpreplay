@@ -39,8 +39,8 @@ To replay requests from `requests.tap` with 10 QPS, 5 concurrent requests, and a
 ### Tap File Format
 The tap file should contain one HTTP request per line, formatted similarly to `curl` commands. Example:
 ```
-http://example.com/api -X GET -H "Authorization: Bearer token"
-http://example.com/post -X POST -H "Content-Type: application/json"
+http://example.com/api -X GET -H 'Authorization: Bearer token'
+http://example.com/post -X POST -H 'Content-Type: application/json' -d '{"hello":"world"}'
 ```
 
 ### Output

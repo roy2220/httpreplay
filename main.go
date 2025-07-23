@@ -48,6 +48,16 @@ func main() {
 	<-c
 }
 
+const (
+	bufferSize                  = 16 * 1024 * 1024
+	failureTapFileExt           = ".httpreplay-failure"
+	tapPositionFileExt          = ".httpreplay-pos"
+	autoFlushFailureTapInternal = 500 * time.Millisecond
+	autoSaveTapPositionInternal = 200 * time.Millisecond
+)
+
+var debugMode = os.Getenv("DEBUG") == "1"
+
 type httpRequester struct {
 	tapFile          *os.File
 	tapPosition      atomic.Int64
@@ -86,9 +96,9 @@ func newHttpRequester(
 	}()
 	tapPosition, err := loadTapPosition(tapFileName)
 	if err != nil {
-		log.Println("[WARN] failed to load tap position: " + err.Error())
+		log.Printf("[WARN] failed to load tap position: %v", err)
 	}
-	failureTapFileName := tapFileName + ".httpreplay-failure"
+	failureTapFileName := tapFileName + failureTapFileExt
 	failureTapFile, err := os.OpenFile(failureTapFileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open failure tap file %q: %w", failureTapFileName, err)
@@ -104,7 +114,7 @@ func newHttpRequester(
 	r := &httpRequester{
 		tapFile:          tapFile,
 		failureTapFile:   failureTapFile,
-		failureTap:       bufio.NewWriterSize(failureTapFile, 16*1024*1024),
+		failureTap:       bufio.NewWriterSize(failureTapFile, bufferSize),
 		qpsLimit:         qpsLimit,
 		concurrencyLimit: concurrencyLimit,
 		httpClient: &http.Client{
@@ -142,6 +152,12 @@ func (r *httpRequester) start() {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
+		r.autoFlushFailureTap()
+	}()
+
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
 		r.autoSaveTapPosition()
 	}()
 
@@ -153,15 +169,15 @@ func (r *httpRequester) start() {
 }
 
 func (r *httpRequester) run() {
-	acquireQpsToken := func() (func(), bool) { return func() {}, true }
+	acquireQpsToken := func() bool { return true }
 	if r.qpsLimit >= 1 {
 		limiter := ratelimit.New(r.qpsLimit)
-		acquireQpsToken = func() (func(), bool) {
-			limiter.Take()
+		acquireQpsToken = func() bool {
 			if r.backgroundCtx.Err() != nil {
-				return nil, false
+				return false
 			}
-			return func() {}, true
+			limiter.Take()
+			return true
 		}
 	}
 
@@ -180,11 +196,10 @@ func (r *httpRequester) run() {
 
 	for httpRequest, line := range readHttpRequests(r.tapFile, int(r.tapPosition.Load())) {
 		if next := func() bool {
-			releaseQpsToken, ok := acquireQpsToken()
+			ok := acquireQpsToken()
 			if !ok {
 				return false
 			}
-			defer releaseQpsToken()
 
 			releaseConcurrencyToken, ok := acquireConcurrencyToken()
 			if !ok {
@@ -207,7 +222,7 @@ func (r *httpRequester) run() {
 	select {
 	case r.completion <- syscall.Signal(0):
 	}
-	log.Println("[INFO] all http requests have been processed")
+	log.Printf("[INFO] all http requests have been processed")
 }
 
 func (r *httpRequester) doHttpRequest(request *http.Request, line string) {
@@ -246,12 +261,31 @@ func (r *httpRequester) recordFailedHttpRequest(line string) {
 	r.failureTapLock.Unlock()
 
 	if err != nil {
-		log.Println("[WARN] failed to write failure tap file: " + err.Error())
+		log.Printf("[WARN] failed to write failure tap file: %v", err)
+	}
+}
+func (r *httpRequester) autoFlushFailureTap() {
+	ticker := time.NewTicker(autoFlushFailureTapInternal)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.backgroundCtx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		r.failureTapLock.Lock()
+		err := r.failureTap.Flush()
+		r.failureTapLock.Unlock()
+		if err != nil {
+			log.Printf("[WARN] failed to flush failure tap: %v", err)
+		}
 	}
 }
 
 func (r *httpRequester) autoSaveTapPosition() {
-	ticker := time.NewTicker(200 * time.Millisecond)
+	ticker := time.NewTicker(autoSaveTapPositionInternal)
 	defer ticker.Stop()
 
 	for {
@@ -263,7 +297,7 @@ func (r *httpRequester) autoSaveTapPosition() {
 
 		err := saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()))
 		if err != nil {
-			log.Println("[WARN] failed to save tap position: " + err.Error())
+			log.Printf("[WARN] failed to save tap position: %v", err)
 		}
 	}
 }
@@ -298,12 +332,12 @@ func (r *httpRequester) Close() {
 	r.tapFile.Close()
 	err := r.failureTap.Flush()
 	if err != nil {
-		log.Println("[WARN] failed to flush failure tap: " + err.Error())
+		log.Printf("[WARN] failed to flush failure tap: %v", err)
 	}
 	r.failureTapFile.Close()
 	err = saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()))
 	if err != nil {
-		log.Println("[WARN] failed to save tap position: " + err.Error())
+		log.Printf("[WARN] failed to save tap position: %v", err)
 	}
 }
 
@@ -313,7 +347,7 @@ func (r *httpRequester) stop() {
 }
 
 func loadTapPosition(tapFileName string) (int, error) {
-	tapPositionFileName := makeTapPositionFileName(tapFileName)
+	tapPositionFileName := tapFileName + tapPositionFileExt
 	data, err := os.ReadFile(tapPositionFileName)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -330,18 +364,16 @@ func loadTapPosition(tapFileName string) (int, error) {
 }
 
 func saveTapPosition(tapFileName string, tapPosition int) error {
-	tapPositionFileName := makeTapPositionFileName(tapFileName)
+	tapPositionFileName := tapFileName + tapPositionFileExt
 	tapPositionStr := strconv.FormatUint(uint64(tapPosition), 10)
 	err := os.WriteFile(tapPositionFileName, []byte(tapPositionStr), 0644)
 	return err
 }
 
-func makeTapPositionFileName(tapFileName string) string { return tapFileName + ".httpreplay-pos" }
-
 func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq2[*http.Request, string] {
 	return func(yield func(*http.Request, string) bool) {
 		scanner := bufio.NewScanner(reader)
-		scanner.Buffer(nil, 16*1024*1024)
+		scanner.Buffer(nil, bufferSize)
 
 		for scanner.Scan() {
 			if numberOfHttpRequestsToSkip >= 1 {
@@ -368,13 +400,12 @@ func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq
 	}
 }
 
-var debugMode = os.Getenv("DEBUG") == "1"
-
 func parseHttpRequest(line string) (*http.Request, error) {
 	var args struct {
 		URL string   `arg:"required,positional"`
 		X   string   `arg:"-X,--" default:"GET"`
 		H   []string `arg:"separate,-H,--"`
+		D   *string  `arg:"-d,--"`
 	}
 	rawArgs, err := shlex.Split(line)
 	if err != nil {
@@ -388,7 +419,13 @@ func parseHttpRequest(line string) (*http.Request, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse arguments: %w", err)
 	}
-	httpRequest, err := http.NewRequest(args.X, args.URL, nil)
+	var rawBody *string
+	var body io.Reader
+	if args.D != nil {
+		rawBody = args.D
+		body = strings.NewReader(*rawBody)
+	}
+	httpRequest, err := http.NewRequest(args.X, args.URL, body)
 	if err != nil {
 		return nil, fmt.Errorf("new http request: %w", err)
 	}
@@ -405,7 +442,11 @@ func parseHttpRequest(line string) (*http.Request, error) {
 		httpRequest.Header = http.Header(header)
 	}
 	if debugMode {
-		log.Printf("[DEBUG] http request, method=%q, url=%q, header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
+		if rawBody == nil {
+			log.Printf("[DEBUG] http request, method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
+		} else {
+			log.Printf("[DEBUG] http request, method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, *rawBody)
+		}
 	}
 	return httpRequest, nil
 }
