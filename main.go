@@ -32,21 +32,21 @@ func main() {
 		ConcurrencyLimit  int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"The limt of concurrency, no limit if less than 1" default:"1"`
 		Timeout           int    `arg:"-t,--" placeholder:"TIMEOUT" help:"The timeout of http request in seconds, no limit if less than 1" default:"10"`
 	}
-	p := arg.MustParse(&args)
+	parser := arg.MustParse(&args)
 	if args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
-		p.Fail("should limit at least one of qps or concurrency")
-	}
-
-	r, err := newHttpRequester(args.TapFileName, args.FailedTapFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second)
-	if err != nil {
-		log.Fatalf("[FATAL] failed to create http requester: %v", err)
+		parser.Fail("should limit at least one of qps or concurrency")
 	}
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-	<-c
 
-	r.Close()
+	r, err := newHttpRequester(args.TapFileName, args.FailedTapFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, c)
+	if err != nil {
+		log.Fatalf("[FATAL] failed to create http requester: %v", err)
+	}
+	defer r.Close()
+
+	<-c
 }
 
 type httpRequester struct {
@@ -57,11 +57,14 @@ type httpRequester struct {
 	qpsLimit         int
 	concurrencyLimit int
 	httpClient       *http.Client
+	completion       chan<- os.Signal
 
 	backgroundCtx context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
 
+	concurrency            atomic.Int64
+	requestCount           atomic.Int64
 	successfulRequestCount atomic.Int64
 	failedRequestCount     atomic.Int64
 }
@@ -71,6 +74,7 @@ func newHttpRequester(
 	failureTapFileName string,
 	qpsLimit, concurrencyLimit int,
 	timeout time.Duration,
+	completion chan<- os.Signal,
 ) (_ *httpRequester, returnedErr error) {
 	tapFile, err := os.Open(tapFileName)
 	if err != nil {
@@ -119,6 +123,7 @@ func newHttpRequester(
 
 			Timeout: timeout,
 		},
+		completion: completion,
 	}
 	r.tapPosition.Store(int64(tapPosition))
 	r.start()
@@ -174,16 +179,16 @@ func (r *httpRequester) run() {
 	}
 
 	for httpRequest, line := range readHttpRequests(r.tapFile, int(r.tapPosition.Load())) {
-		func() {
+		if next := func() bool {
 			releaseQpsToken, ok := acquireQpsToken()
 			if !ok {
-				return
+				return false
 			}
 			defer releaseQpsToken()
 
 			releaseConcurrencyToken, ok := acquireConcurrencyToken()
 			if !ok {
-				return
+				return false
 			}
 			defer releaseConcurrencyToken()
 
@@ -193,11 +198,23 @@ func (r *httpRequester) run() {
 				defer r.wg.Done()
 				r.doHttpRequest(httpRequest, line)
 			}()
-		}()
+			return true
+		}(); !next {
+			return
+		}
 	}
+
+	select {
+	case r.completion <- syscall.Signal(0):
+	}
+	log.Println("[INFO] all http requests have been processed")
 }
 
 func (r *httpRequester) doHttpRequest(request *http.Request, line string) {
+	r.concurrency.Add(1)
+	defer r.concurrency.Add(-1)
+
+	r.requestCount.Add(1)
 	resp, err := r.httpClient.Do(request)
 	if err != nil {
 		r.failedRequestCount.Add(1)
@@ -238,10 +255,11 @@ func (r *httpRequester) autoSaveTapPosition() {
 		case <-r.backgroundCtx.Done():
 			return
 		case <-ticker.C:
-			err := saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()))
-			if err != nil {
-				log.Println("[WARN] failed to save tap position: " + err.Error())
-			}
+		}
+
+		err := saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()))
+		if err != nil {
+			log.Println("[WARN] failed to save tap position: " + err.Error())
 		}
 	}
 }
@@ -250,21 +268,23 @@ func (r *httpRequester) showStats() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	for {
+	preCount := int64(0)
+	for next := true; next; {
 		select {
 		case <-r.backgroundCtx.Done():
-			return
+			next = false
 		case <-ticker.C:
-			successfulCount := r.successfulRequestCount.Load()
-			failedCount := r.failedRequestCount.Load()
-			totalCount := successfulCount + failedCount
-			if totalCount == 0 {
-				continue
-			}
-			successRate := float64(successfulCount) / float64(totalCount) * 100
-			log.Printf("[INFO] successful: %d, failed: %d, total: %d, success rate: %.2f%%\n",
-				successfulCount, failedCount, totalCount, successRate)
 		}
+
+		position := r.tapPosition.Load()
+		concurrency := r.concurrency.Load()
+		count := r.requestCount.Load()
+		qps := count - preCount
+		successfulCount := r.successfulRequestCount.Load()
+		failedCount := r.failedRequestCount.Load()
+		successRate := float64(successfulCount) / float64(count)
+		log.Printf("[INFO] position: %d, qps: %d, concurrency: %d, successful: %d, failed: %d, success rate: %.2f",
+			position, qps, concurrency, successfulCount, failedCount, successRate)
 	}
 }
 
@@ -312,7 +332,7 @@ func saveTapPosition(tapFileName string, tapPosition int) error {
 	return err
 }
 
-func makeTapPositionFileName(tapFileName string) string { return tapFileName + ".pos" }
+func makeTapPositionFileName(tapFileName string) string { return tapFileName + ".tap-pos" }
 
 func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq2[*http.Request, string] {
 	return func(yield func(*http.Request, string) bool) {
@@ -344,21 +364,23 @@ func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq
 	}
 }
 
+var debugMode = os.Getenv("DEBUG") == "1"
+
 func parseHttpRequest(line string) (*http.Request, error) {
 	var args struct {
 		URL string   `arg:"required,positional"`
 		X   string   `arg:"-X,--" default:"GET"`
-		H   []string `arg:"-H,--"`
+		H   []string `arg:"separate,-H,--"`
 	}
 	rawArgs, err := shlex.Split(line)
 	if err != nil {
 		return nil, fmt.Errorf("split line: %w", err)
 	}
-	p, err := arg.NewParser(arg.Config{}, &args)
+	parser, err := arg.NewParser(arg.Config{}, &args)
 	if err != nil {
 		return nil, fmt.Errorf("new argument parser: %w", err)
 	}
-	err = p.Parse(rawArgs)
+	err = parser.Parse(rawArgs)
 	if err != nil {
 		return nil, fmt.Errorf("parse arguments: %w", err)
 	}
@@ -369,7 +391,7 @@ func parseHttpRequest(line string) (*http.Request, error) {
 	if len(args.H) >= 1 {
 		reader := textproto.NewReader(
 			bufio.NewReader(
-				strings.NewReader(strings.Join(args.H, "\r\n") + "\r\n"),
+				strings.NewReader(strings.Join(args.H, "\r\n") + "\r\n\r\n"),
 			),
 		)
 		header, err := reader.ReadMIMEHeader()
@@ -377,6 +399,9 @@ func parseHttpRequest(line string) (*http.Request, error) {
 			return nil, fmt.Errorf("read MIME header: %w", err)
 		}
 		httpRequest.Header = http.Header(header)
+	}
+	if debugMode {
+		log.Printf("[DEBUG] http request, method=%q, url=%q, header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
 	}
 	return httpRequest, nil
 }
