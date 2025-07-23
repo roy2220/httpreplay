@@ -52,7 +52,8 @@ type httpRequester struct {
 	tapFile          *os.File
 	tapPosition      atomic.Int64
 	failureTapFile   *os.File
-	failureTapWriter *bufio.Writer
+	failureTapLock   sync.Mutex
+	failureTap       *bufio.Writer
 	qpsLimit         int
 	concurrencyLimit int
 	httpClient       *http.Client
@@ -103,7 +104,7 @@ func newHttpRequester(
 	r := &httpRequester{
 		tapFile:          tapFile,
 		failureTapFile:   failureTapFile,
-		failureTapWriter: bufio.NewWriterSize(failureTapFile, 16*1024*1024),
+		failureTap:       bufio.NewWriterSize(failureTapFile, 16*1024*1024),
 		qpsLimit:         qpsLimit,
 		concurrencyLimit: concurrencyLimit,
 		httpClient: &http.Client{
@@ -232,14 +233,18 @@ func (r *httpRequester) doHttpRequest(request *http.Request, line string) {
 
 func (r *httpRequester) recordFailedHttpRequest(line string) {
 	var err error
-	_, err1 := r.failureTapWriter.WriteString(line)
+
+	r.failureTapLock.Lock()
+	_, err1 := r.failureTap.WriteString(line)
 	if err1 != nil {
 		err = err1
 	}
-	err2 := r.failureTapWriter.WriteByte('\n')
+	err2 := r.failureTap.WriteByte('\n')
 	if err2 != nil {
 		err = err2
 	}
+	r.failureTapLock.Unlock()
+
 	if err != nil {
 		log.Println("[WARN] failed to write failure tap file: " + err.Error())
 	}
@@ -291,9 +296,9 @@ func (r *httpRequester) Close() {
 	r.stop()
 
 	r.tapFile.Close()
-	err := r.failureTapWriter.Flush()
+	err := r.failureTap.Flush()
 	if err != nil {
-		log.Println("[WARN] failed to flush failure tap file: " + err.Error())
+		log.Println("[WARN] failed to flush failure tap: " + err.Error())
 	}
 	r.failureTapFile.Close()
 	err = saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()))
