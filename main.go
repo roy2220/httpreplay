@@ -29,7 +29,7 @@ func main() {
 		TapFileName      string `arg:"required,positional" placeholder:"TAP-FILE" help:"The tap file containing http requests"`
 		QpsLimit         int    `arg:"-q,--" placeholder:"QPS" help:"The limt of qps, no limit if less than 1" default:"1"`
 		ConcurrencyLimit int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"The limt of concurrency, no limit if less than 1" default:"1"`
-		Timeout          int    `arg:"-t,--" placeholder:"TIMEOUT" help:"The timeout of http request in seconds, no limit if less than 1" default:"10"`
+		Timeout          int    `arg:"-t,--" placeholder:"TIMEOUT" help:"The timeout of http request in seconds, no timeout if less than 1" default:"10"`
 	}
 	parser := arg.MustParse(&args)
 	if args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
