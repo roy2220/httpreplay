@@ -24,9 +24,9 @@ Run the tool with the following command:
 
 ### Arguments
 - **TAP-FILE** (required): Path to the tap file containing HTTP requests. Each line should be a valid HTTP request in a format parseable by `shlex` (e.g., `curl`-like syntax: `URL -X METHOD -H "Header: Value"`).
-- **-q, --qps QPS**: Queries per second limit. Set to `< 1` for no limit (default: 1).
-- **-c, --concurrency CONCURRENCY**: Concurrent request limit. Set to `< 1` for no limit (default: 1).
-- **-t, --timeout TIMEOUT**: HTTP request timeout in seconds. Set to `< 1` for no timeout (default: 10).
+- **-q**: Queries per second limit. Set to `< 1` for no limit (default: 1).
+- **-c CONCURRENCY**: Concurrent request limit. Set to `< 1` for no limit (default: 1).
+- **-t TIMEOUT**: HTTP request timeout in seconds. Set to `< 1` for no timeout (default: 10).
 
 **Note**: At least one of QPS or concurrency must be limited (i.e., both cannot be `< 1`).
 
