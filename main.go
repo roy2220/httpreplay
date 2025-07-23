@@ -42,7 +42,6 @@ func main() {
 		log.Fatalf("[FATAL] failed to create http requester: %v", err)
 	}
 
-	// 监听退出信号
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	<-c
@@ -72,21 +71,29 @@ func newHttpRequester(
 	failureTapFileName string,
 	qpsLimit, concurrencyLimit int,
 	timeout time.Duration,
-) (*httpRequester, error) {
+) (_ *httpRequester, returnedErr error) {
 	tapFile, err := os.Open(tapFileName)
 	if err != nil {
 		return nil, fmt.Errorf("open tap file %q: %w", tapFileName, err)
 	}
+	defer func() {
+		if returnedErr != nil {
+			tapFile.Close()
+		}
+	}()
 	tapPosition, err := loadTapPosition(tapFileName)
 	if err != nil {
-		tapFile.Close()
 		log.Println("[WARN] failed to load tap position: " + err.Error())
 	}
 	failureTapFile, err := os.OpenFile(failureTapFileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
-		tapFile.Close()
 		return nil, fmt.Errorf("open failure tap file %q: %w", failureTapFileName, err)
 	}
+	defer func() {
+		if returnedErr != nil {
+			failureTapFile.Close()
+		}
+	}()
 	if timeout < 0 {
 		timeout = 0
 	}
