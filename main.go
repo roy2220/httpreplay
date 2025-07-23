@@ -306,7 +306,7 @@ func (r *httpRequester) showStats() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	preCount := int64(0)
+	prevCount := int64(0)
 	for next := true; next; {
 		select {
 		case <-r.backgroundCtx.Done():
@@ -317,7 +317,8 @@ func (r *httpRequester) showStats() {
 		position := r.tapPosition.Load()
 		concurrency := r.concurrency.Load()
 		count := r.requestCount.Load()
-		qps := count - preCount
+		qps := count - prevCount
+		prevCount = count
 		successfulCount := r.successfulRequestCount.Load()
 		failedCount := r.failedRequestCount.Load()
 		successRate := float64(successfulCount) / float64(count)
