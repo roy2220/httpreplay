@@ -26,11 +26,10 @@ import (
 
 func main() {
 	var args struct {
-		TapFileName       string `arg:"required,positional" placeholder:"TAP-FILE" help:"The tap file containing http requests"`
-		FailedTapFileName string `arg:"required,positional" placeholder:"FAILED-TAP-FILE" help:"The tap file containing failed http requests"`
-		QpsLimit          int    `arg:"-q,--" placeholder:"QPS" help:"The limt of qps, no limit if less than 1" default:"1"`
-		ConcurrencyLimit  int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"The limt of concurrency, no limit if less than 1" default:"1"`
-		Timeout           int    `arg:"-t,--" placeholder:"TIMEOUT" help:"The timeout of http request in seconds, no limit if less than 1" default:"10"`
+		TapFileName      string `arg:"required,positional" placeholder:"TAP-FILE" help:"The tap file containing http requests"`
+		QpsLimit         int    `arg:"-q,--" placeholder:"QPS" help:"The limt of qps, no limit if less than 1" default:"1"`
+		ConcurrencyLimit int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"The limt of concurrency, no limit if less than 1" default:"1"`
+		Timeout          int    `arg:"-t,--" placeholder:"TIMEOUT" help:"The timeout of http request in seconds, no limit if less than 1" default:"10"`
 	}
 	parser := arg.MustParse(&args)
 	if args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
@@ -40,7 +39,7 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 
-	r, err := newHttpRequester(args.TapFileName, args.FailedTapFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, c)
+	r, err := newHttpRequester(args.TapFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, c)
 	if err != nil {
 		log.Fatalf("[FATAL] failed to create http requester: %v", err)
 	}
@@ -71,7 +70,6 @@ type httpRequester struct {
 
 func newHttpRequester(
 	tapFileName string,
-	failureTapFileName string,
 	qpsLimit, concurrencyLimit int,
 	timeout time.Duration,
 	completion chan<- os.Signal,
@@ -89,6 +87,7 @@ func newHttpRequester(
 	if err != nil {
 		log.Println("[WARN] failed to load tap position: " + err.Error())
 	}
+	failureTapFileName := tapFileName + ".httpreplay-failure"
 	failureTapFile, err := os.OpenFile(failureTapFileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open failure tap file %q: %w", failureTapFileName, err)
@@ -332,7 +331,7 @@ func saveTapPosition(tapFileName string, tapPosition int) error {
 	return err
 }
 
-func makeTapPositionFileName(tapFileName string) string { return tapFileName + ".tap-pos" }
+func makeTapPositionFileName(tapFileName string) string { return tapFileName + ".httpreplay-pos" }
 
 func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq2[*http.Request, string] {
 	return func(yield func(*http.Request, string) bool) {
