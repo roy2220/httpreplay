@@ -4,10 +4,10 @@ This is a Go-based command-line tool for replaying HTTP requests from a tap file
 
 ## Features
 - Reads HTTP requests from a specified tap file.
+- **Tracks and saves the position in the tap file for resuming.**
+- Logs failed requests to a `.httpreplay-failure` file.
 - Supports rate limiting (QPS) and concurrency control.
 - Configurable HTTP request timeout.
-- Logs failed requests to a `.httpreplay-failure` file.
-- Tracks and saves the position in the tap file for resuming.
 - Displays real-time statistics (QPS, concurrency, success rate, etc.).
 - Graceful shutdown on SIGINT/SIGTERM signals.
 

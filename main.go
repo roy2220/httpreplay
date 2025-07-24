@@ -57,7 +57,7 @@ const (
 	saveTapPositionInterval = 200 * time.Millisecond
 )
 
-var debugMode = os.Getenv("DEBUG") == "1"
+var debug = os.Getenv("DEBUG") == "1"
 
 type httpRequester struct {
 	tapFile          *os.File
@@ -469,7 +469,7 @@ func parseHttpRequest(line string) (*http.Request, error) {
 		}
 		httpRequest.Header = http.Header(header)
 	}
-	if debugMode {
+	if debug {
 		if rawBody == nil {
 			log.Printf("[DEBUG] http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
 		} else {
