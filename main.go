@@ -53,7 +53,7 @@ const (
 	bufferSize               = 16 * 1024 * 1024
 	failureTapeFileExt       = ".httpreplay-failure"
 	tapePositionFileExt      = ".httpreplay-pos"
-	flushFailureTapInterval  = 500 * time.Millisecond
+	flushFailureTapeInterval = 500 * time.Millisecond
 	saveTapePositionInterval = 200 * time.Millisecond
 )
 
@@ -63,8 +63,8 @@ type httpRequester struct {
 	tapeFile         *os.File
 	tapePosition     atomic.Int64
 	failureTapeFile  *os.File
-	failureTapLock   sync.Mutex
-	failureTap       *bufio.Writer
+	failureTapeLock  sync.Mutex
+	failureTape      *bufio.Writer
 	qpsLimit         int
 	concurrencyLimit int
 	httpClient       *http.Client
@@ -117,7 +117,7 @@ func newHttpRequester(
 	r := &httpRequester{
 		tapeFile:         tapeFile,
 		failureTapeFile:  failureTapeFile,
-		failureTap:       bufio.NewWriterSize(failureTapeFile, bufferSize),
+		failureTape:      bufio.NewWriterSize(failureTapeFile, bufferSize),
 		qpsLimit:         qpsLimit,
 		concurrencyLimit: concurrencyLimit,
 		httpClient: &http.Client{
@@ -265,23 +265,23 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 func (r *httpRequester) recordFailedHttpRequest(line string) {
 	var err error
 
-	r.failureTapLock.Lock()
-	_, err1 := r.failureTap.WriteString(line)
+	r.failureTapeLock.Lock()
+	_, err1 := r.failureTape.WriteString(line)
 	if err1 != nil {
 		err = err1
 	}
-	err2 := r.failureTap.WriteByte('\n')
+	err2 := r.failureTape.WriteByte('\n')
 	if err2 != nil {
 		err = err2
 	}
-	r.failureTapLock.Unlock()
+	r.failureTapeLock.Unlock()
 
 	if err != nil {
 		log.Printf("[WARN] failed to write failure tape file: %v", err)
 	}
 }
 func (r *httpRequester) flushFailureTapePeriodically() {
-	ticker := time.NewTicker(flushFailureTapInterval)
+	ticker := time.NewTicker(flushFailureTapeInterval)
 	defer ticker.Stop()
 
 	for {
@@ -291,9 +291,9 @@ func (r *httpRequester) flushFailureTapePeriodically() {
 		case <-ticker.C:
 		}
 
-		r.failureTapLock.Lock()
-		err := r.failureTap.Flush()
-		r.failureTapLock.Unlock()
+		r.failureTapeLock.Lock()
+		err := r.failureTape.Flush()
+		r.failureTapeLock.Unlock()
 		if err != nil {
 			log.Printf("[WARN] failed to flush failure tape: %v", err)
 		}
@@ -347,7 +347,7 @@ func (r *httpRequester) Close() {
 	r.stop()
 
 	r.tapeFile.Close()
-	err := r.failureTap.Flush()
+	err := r.failureTape.Flush()
 	if err != nil {
 		log.Printf("[WARN] failed to flush failure tape: %v", err)
 	}
