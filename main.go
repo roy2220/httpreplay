@@ -26,7 +26,7 @@ import (
 
 func main() {
 	var args struct {
-		TapFileName      string `arg:"required,positional" placeholder:"TAP-FILE" help:"The tap file containing http requests"`
+		TapeFileName     string `arg:"required,positional" placeholder:"TAPE-FILE" help:"The tape file containing http requests"`
 		QpsLimit         int    `arg:"-q,--" placeholder:"QPS" help:"The limt of qps, no limit if less than 1" default:"1"`
 		ConcurrencyLimit int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"The limt of concurrency, no limit if less than 1" default:"1"`
 		Timeout          int    `arg:"-t,--" placeholder:"TIMEOUT" help:"The timeout of http request in seconds, no timeout if less than 1" default:"10"`
@@ -40,7 +40,7 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 
-	httpRequester, err := newHttpRequester(args.TapFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, args.DryRun, c)
+	httpRequester, err := newHttpRequester(args.TapeFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, args.DryRun, c)
 	if err != nil {
 		log.Fatalf("[FATAL] failed to create http requester: %v", err)
 	}
@@ -50,19 +50,19 @@ func main() {
 }
 
 const (
-	bufferSize              = 16 * 1024 * 1024
-	failureTapFileExt       = ".httpreplay-failure"
-	tapPositionFileExt      = ".httpreplay-pos"
-	flushFailureTapInterval = 500 * time.Millisecond
-	saveTapPositionInterval = 200 * time.Millisecond
+	bufferSize               = 16 * 1024 * 1024
+	failureTapeFileExt       = ".httpreplay-failure"
+	tapePositionFileExt      = ".httpreplay-pos"
+	flushFailureTapInterval  = 500 * time.Millisecond
+	saveTapePositionInterval = 200 * time.Millisecond
 )
 
 var debug = os.Getenv("DEBUG") == "1"
 
 type httpRequester struct {
-	tapFile          *os.File
-	tapPosition      atomic.Int64
-	failureTapFile   *os.File
+	tapeFile         *os.File
+	tapePosition     atomic.Int64
+	failureTapeFile  *os.File
 	failureTapLock   sync.Mutex
 	failureTap       *bufio.Writer
 	qpsLimit         int
@@ -82,42 +82,42 @@ type httpRequester struct {
 }
 
 func newHttpRequester(
-	tapFileName string,
+	tapeFileName string,
 	qpsLimit, concurrencyLimit int,
 	timeout time.Duration,
 	dryRun bool,
 	idleSignal chan<- os.Signal,
 ) (_ *httpRequester, returnedErr error) {
-	tapFile, err := os.Open(tapFileName)
+	tapeFile, err := os.Open(tapeFileName)
 	if err != nil {
-		return nil, fmt.Errorf("open tap file %q: %w", tapFileName, err)
+		return nil, fmt.Errorf("open tape file %q: %w", tapeFileName, err)
 	}
 	defer func() {
 		if returnedErr != nil {
-			tapFile.Close()
+			tapeFile.Close()
 		}
 	}()
-	tapPosition, err := loadTapPosition(tapFileName, dryRun)
+	tapePosition, err := loadTapePosition(tapeFileName, dryRun)
 	if err != nil {
-		log.Printf("[WARN] failed to load tap position: %v", err)
+		log.Printf("[WARN] failed to load tape position: %v", err)
 	}
-	failureTapFileName := tapFileName + failureTapFileExt
-	failureTapFile, err := os.OpenFile(failureTapFileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	failureTapeFileName := tapeFileName + failureTapeFileExt
+	failureTapeFile, err := os.OpenFile(failureTapeFileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("open failure tap file %q: %w", failureTapFileName, err)
+		return nil, fmt.Errorf("open failure tape file %q: %w", failureTapeFileName, err)
 	}
 	defer func() {
 		if returnedErr != nil {
-			failureTapFile.Close()
+			failureTapeFile.Close()
 		}
 	}()
 	if timeout < 0 {
 		timeout = 0
 	}
 	r := &httpRequester{
-		tapFile:          tapFile,
-		failureTapFile:   failureTapFile,
-		failureTap:       bufio.NewWriterSize(failureTapFile, bufferSize),
+		tapeFile:         tapeFile,
+		failureTapeFile:  failureTapeFile,
+		failureTap:       bufio.NewWriterSize(failureTapeFile, bufferSize),
 		qpsLimit:         qpsLimit,
 		concurrencyLimit: concurrencyLimit,
 		httpClient: &http.Client{
@@ -139,7 +139,7 @@ func newHttpRequester(
 		dryRun:     dryRun,
 		idleSignal: idleSignal,
 	}
-	r.tapPosition.Store(int64(tapPosition))
+	r.tapePosition.Store(int64(tapePosition))
 	r.start()
 	return r, nil
 }
@@ -156,13 +156,13 @@ func (r *httpRequester) start() {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		r.flushFailureTapPeriodically()
+		r.flushFailureTapePeriodically()
 	}()
 
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		r.saveTapPositionPeriodically()
+		r.saveTapePositionPeriodically()
 	}()
 
 	r.wg.Add(1)
@@ -198,7 +198,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 	}
 
-	for httpRequest, line := range readHttpRequests(r.tapFile, int(r.tapPosition.Load())) {
+	for httpRequest, line := range readHttpRequests(r.tapeFile, int(r.tapePosition.Load())) {
 		if next := func() bool {
 			ok := acquireQpsToken()
 			if !ok {
@@ -210,7 +210,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 				return false
 			}
 
-			r.tapPosition.Add(1)
+			r.tapePosition.Add(1)
 			r.wg.Add(1)
 			go func() {
 				defer releaseConcurrencyToken()
@@ -277,10 +277,10 @@ func (r *httpRequester) recordFailedHttpRequest(line string) {
 	r.failureTapLock.Unlock()
 
 	if err != nil {
-		log.Printf("[WARN] failed to write failure tap file: %v", err)
+		log.Printf("[WARN] failed to write failure tape file: %v", err)
 	}
 }
-func (r *httpRequester) flushFailureTapPeriodically() {
+func (r *httpRequester) flushFailureTapePeriodically() {
 	ticker := time.NewTicker(flushFailureTapInterval)
 	defer ticker.Stop()
 
@@ -295,13 +295,13 @@ func (r *httpRequester) flushFailureTapPeriodically() {
 		err := r.failureTap.Flush()
 		r.failureTapLock.Unlock()
 		if err != nil {
-			log.Printf("[WARN] failed to flush failure tap: %v", err)
+			log.Printf("[WARN] failed to flush failure tape: %v", err)
 		}
 	}
 }
 
-func (r *httpRequester) saveTapPositionPeriodically() {
-	ticker := time.NewTicker(saveTapPositionInterval)
+func (r *httpRequester) saveTapePositionPeriodically() {
+	ticker := time.NewTicker(saveTapePositionInterval)
 	defer ticker.Stop()
 
 	for {
@@ -311,9 +311,9 @@ func (r *httpRequester) saveTapPositionPeriodically() {
 		case <-ticker.C:
 		}
 
-		err := saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()), r.dryRun)
+		err := saveTapePosition(r.tapeFile.Name(), int(r.tapePosition.Load()), r.dryRun)
 		if err != nil {
-			log.Printf("[WARN] failed to save tap position: %v", err)
+			log.Printf("[WARN] failed to save tape position: %v", err)
 		}
 	}
 }
@@ -330,7 +330,7 @@ func (r *httpRequester) logStats() {
 		case <-ticker.C:
 		}
 
-		position := r.tapPosition.Load()
+		position := r.tapePosition.Load()
 		concurrency := r.concurrency.Load()
 		count := r.requestCount.Load()
 		qps := count - prevCount
@@ -346,15 +346,15 @@ func (r *httpRequester) logStats() {
 func (r *httpRequester) Close() {
 	r.stop()
 
-	r.tapFile.Close()
+	r.tapeFile.Close()
 	err := r.failureTap.Flush()
 	if err != nil {
-		log.Printf("[WARN] failed to flush failure tap: %v", err)
+		log.Printf("[WARN] failed to flush failure tape: %v", err)
 	}
-	r.failureTapFile.Close()
-	err = saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()), r.dryRun)
+	r.failureTapeFile.Close()
+	err = saveTapePosition(r.tapeFile.Name(), int(r.tapePosition.Load()), r.dryRun)
 	if err != nil {
-		log.Printf("[WARN] failed to save tap position: %v", err)
+		log.Printf("[WARN] failed to save tape position: %v", err)
 	}
 }
 
@@ -363,36 +363,36 @@ func (r *httpRequester) stop() {
 	r.wg.Wait()
 }
 
-func loadTapPosition(tapFileName string, dryRun bool) (int, error) {
-	tapPositionFileName := makeTapPositionFileName(tapFileName, dryRun)
-	data, err := os.ReadFile(tapPositionFileName)
+func loadTapePosition(tapeFileName string, dryRun bool) (int, error) {
+	tapePositionFileName := makeTapePositionFileName(tapeFileName, dryRun)
+	data, err := os.ReadFile(tapePositionFileName)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
 		return 0, err
 	}
-	tapPositionStr := string(data)
-	tapPosition, err := strconv.ParseUint(tapPositionStr, 10, 32)
+	tapePositionStr := string(data)
+	tapePosition, err := strconv.ParseUint(tapePositionStr, 10, 32)
 	if err != nil {
-		return 0, fmt.Errorf("invalid tap position %q from file %q", tapPositionStr, tapPositionFileName)
+		return 0, fmt.Errorf("invalid tape position %q from file %q", tapePositionStr, tapePositionFileName)
 	}
-	return int(tapPosition), nil
+	return int(tapePosition), nil
 }
 
-func saveTapPosition(tapFileName string, tapPosition int, dryRun bool) error {
-	tapPositionFileName := makeTapPositionFileName(tapFileName, dryRun)
-	tapPositionStr := strconv.FormatUint(uint64(tapPosition), 10)
-	err := os.WriteFile(tapPositionFileName, []byte(tapPositionStr), 0644)
+func saveTapePosition(tapeFileName string, tapePosition int, dryRun bool) error {
+	tapePositionFileName := makeTapePositionFileName(tapeFileName, dryRun)
+	tapePositionStr := strconv.FormatUint(uint64(tapePosition), 10)
+	err := os.WriteFile(tapePositionFileName, []byte(tapePositionStr), 0644)
 	return err
 }
 
-func makeTapPositionFileName(tapFileName string, dryRun bool) string {
-	tapPositionFileName := tapFileName + tapPositionFileExt
+func makeTapePositionFileName(tapeFileName string, dryRun bool) string {
+	tapePositionFileName := tapeFileName + tapePositionFileExt
 	if dryRun {
-		tapPositionFileName += ".dry-run"
+		tapePositionFileName += ".dry-run"
 	}
-	return tapPositionFileName
+	return tapePositionFileName
 }
 
 func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq2[*http.Request, string] {
@@ -420,7 +420,7 @@ func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq
 		}
 
 		if err := scanner.Err(); err != nil {
-			log.Printf("[WARN] failed to read tap file: %v", err)
+			log.Printf("[WARN] failed to read tape file: %v", err)
 		}
 	}
 }
