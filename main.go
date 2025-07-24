@@ -30,6 +30,7 @@ func main() {
 		QpsLimit         int    `arg:"-q,--" placeholder:"QPS" help:"The limt of qps, no limit if less than 1" default:"1"`
 		ConcurrencyLimit int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"The limt of concurrency, no limit if less than 1" default:"1"`
 		Timeout          int    `arg:"-t,--" placeholder:"TIMEOUT" help:"The timeout of http request in seconds, no timeout if less than 1" default:"10"`
+		DryRun           bool   `arg:"-d,--" placeholder:"DRY-RUN" help:"dry-run mode" default:"false"`
 	}
 	parser := arg.MustParse(&args)
 	if args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
@@ -39,7 +40,7 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 
-	httpRequester, err := newHttpRequester(args.TapFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, c)
+	httpRequester, err := newHttpRequester(args.TapFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, args.DryRun, c)
 	if err != nil {
 		log.Fatalf("[FATAL] failed to create http requester: %v", err)
 	}
@@ -67,6 +68,7 @@ type httpRequester struct {
 	qpsLimit         int
 	concurrencyLimit int
 	httpClient       *http.Client
+	dryRun           bool
 	idleSignal       chan<- os.Signal
 
 	backgroundCtx context.Context
@@ -83,6 +85,7 @@ func newHttpRequester(
 	tapFileName string,
 	qpsLimit, concurrencyLimit int,
 	timeout time.Duration,
+	dryRun bool,
 	idleSignal chan<- os.Signal,
 ) (_ *httpRequester, returnedErr error) {
 	tapFile, err := os.Open(tapFileName)
@@ -94,7 +97,7 @@ func newHttpRequester(
 			tapFile.Close()
 		}
 	}()
-	tapPosition, err := loadTapPosition(tapFileName)
+	tapPosition, err := loadTapPosition(tapFileName, dryRun)
 	if err != nil {
 		log.Printf("[WARN] failed to load tap position: %v", err)
 	}
@@ -133,6 +136,7 @@ func newHttpRequester(
 
 			Timeout: timeout,
 		},
+		dryRun:     dryRun,
 		idleSignal: idleSignal,
 	}
 	r.tapPosition.Store(int64(tapPosition))
@@ -225,12 +229,24 @@ func (r *httpRequester) dispatchHttpRequests() {
 	log.Printf("[INFO] all http requests have been processed")
 }
 
-func (r *httpRequester) doHttpRequest(request *http.Request, line string) {
+func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 	r.concurrency.Add(1)
 	defer r.concurrency.Add(-1)
 
 	r.requestCount.Add(1)
-	resp, err := r.httpClient.Do(request)
+	if r.dryRun {
+		if httpRequest.Body == nil {
+			log.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
+		} else {
+			data, _ := io.ReadAll(httpRequest.Body)
+			rawBody := string(data)
+			log.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, rawBody)
+		}
+		r.successfulRequestCount.Add(1)
+		return
+	}
+
+	resp, err := r.httpClient.Do(httpRequest)
 	if err != nil {
 		r.failedRequestCount.Add(1)
 		r.recordFailedHttpRequest(line)
@@ -295,7 +311,7 @@ func (r *httpRequester) saveTapPositionPeriodically() {
 		case <-ticker.C:
 		}
 
-		err := saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()))
+		err := saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()), r.dryRun)
 		if err != nil {
 			log.Printf("[WARN] failed to save tap position: %v", err)
 		}
@@ -336,7 +352,7 @@ func (r *httpRequester) Close() {
 		log.Printf("[WARN] failed to flush failure tap: %v", err)
 	}
 	r.failureTapFile.Close()
-	err = saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()))
+	err = saveTapPosition(r.tapFile.Name(), int(r.tapPosition.Load()), r.dryRun)
 	if err != nil {
 		log.Printf("[WARN] failed to save tap position: %v", err)
 	}
@@ -347,8 +363,8 @@ func (r *httpRequester) stop() {
 	r.wg.Wait()
 }
 
-func loadTapPosition(tapFileName string) (int, error) {
-	tapPositionFileName := tapFileName + tapPositionFileExt
+func loadTapPosition(tapFileName string, dryRun bool) (int, error) {
+	tapPositionFileName := makeTapPositionFileName(tapFileName, dryRun)
 	data, err := os.ReadFile(tapPositionFileName)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -364,11 +380,19 @@ func loadTapPosition(tapFileName string) (int, error) {
 	return int(tapPosition), nil
 }
 
-func saveTapPosition(tapFileName string, tapPosition int) error {
-	tapPositionFileName := tapFileName + tapPositionFileExt
+func saveTapPosition(tapFileName string, tapPosition int, dryRun bool) error {
+	tapPositionFileName := makeTapPositionFileName(tapFileName, dryRun)
 	tapPositionStr := strconv.FormatUint(uint64(tapPosition), 10)
 	err := os.WriteFile(tapPositionFileName, []byte(tapPositionStr), 0644)
 	return err
+}
+
+func makeTapPositionFileName(tapFileName string, dryRun bool) string {
+	tapPositionFileName := tapFileName + tapPositionFileExt
+	if dryRun {
+		tapPositionFileName += ".dry-run"
+	}
+	return tapPositionFileName
 }
 
 func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq2[*http.Request, string] {
@@ -447,9 +471,9 @@ func parseHttpRequest(line string) (*http.Request, error) {
 	}
 	if debugMode {
 		if rawBody == nil {
-			log.Printf("[DEBUG] http request, method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
+			log.Printf("[DEBUG] http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
 		} else {
-			log.Printf("[DEBUG] http request, method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, *rawBody)
+			log.Printf("[DEBUG] http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, *rawBody)
 		}
 	}
 	return httpRequest, nil
