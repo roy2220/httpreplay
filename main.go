@@ -127,7 +127,7 @@ func newHttpRequester(
 					KeepAlive: 30 * time.Second,
 				}).DialContext,
 				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          0,
+				MaxIdleConns:          10000,
 				MaxIdleConnsPerHost:   max(10, concurrencyLimit),
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   timeout,
@@ -209,11 +209,11 @@ func (r *httpRequester) dispatchHttpRequests() {
 			if !ok {
 				return false
 			}
-			defer releaseConcurrencyToken()
 
 			r.tapPosition.Add(1)
 			r.wg.Add(1)
 			go func() {
+				defer releaseConcurrencyToken()
 				defer r.wg.Done()
 				r.doHttpRequest(httpRequest, line)
 			}()
