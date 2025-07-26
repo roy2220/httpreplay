@@ -5,11 +5,11 @@
 ## Features
 
 - Replay HTTP requests from a specified tape file.
+- **Tracks and saves progress for resumable operations.**
 - Configurable QPS and concurrency limits.
 - Adjustable HTTP request timeout.
 - Dry-run mode to preview requests without sending them.
 - Logs failed requests to a failure tape file.
-- Tracks and saves progress for resumable operations.
 - Detailed progress logging with success rate and QPS metrics.
 
 ## Usage
