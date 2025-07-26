@@ -79,10 +79,12 @@ type httpRequester struct {
 	wg            sync.WaitGroup
 	idleness      chan struct{}
 
-	concurrency                atomic.Int64
-	httpRequestCount           atomic.Int64
-	successfulHttpRequestCount atomic.Int64
-	failedHttpRequestCount     atomic.Int64
+	stats struct {
+		concurrency atomic.Int64
+		total       atomic.Int64
+		successful  atomic.Int64
+		failed      atomic.Int64
+	}
 }
 
 func newHttpRequester(
@@ -240,10 +242,10 @@ func (r *httpRequester) dispatchHttpRequests() {
 }
 
 func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
-	r.concurrency.Add(1)
-	defer r.concurrency.Add(-1)
+	r.stats.concurrency.Add(1)
+	defer r.stats.concurrency.Add(-1)
 
-	r.httpRequestCount.Add(1)
+	r.stats.total.Add(1)
 	if r.dryRun {
 		if httpRequest.Body == nil {
 			log.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
@@ -252,24 +254,30 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 			rawBody := string(data)
 			log.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, rawBody)
 		}
-		r.successfulHttpRequestCount.Add(1)
+		r.stats.successful.Add(1)
 		return
 	}
 
 	resp, err := r.httpClient.Do(httpRequest)
 	if err != nil {
-		r.failedHttpRequestCount.Add(1)
+		if debug {
+			log.Printf("[DEBUG] failed to do http request: %v", err)
+		}
+		r.stats.failed.Add(1)
 		r.recordFailedHttpRequest(line)
 		return
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		r.failedHttpRequestCount.Add(1)
+		if debug {
+			log.Printf("[DEBUG] %v %q responded non-2xx status code: %v", httpRequest.Method, httpRequest.URL.String(), resp.StatusCode)
+		}
+		r.stats.failed.Add(1)
 		r.recordFailedHttpRequest(line)
 		return
 	}
-	r.successfulHttpRequestCount.Add(1)
+	r.stats.successful.Add(1)
 }
 
 func (r *httpRequester) recordFailedHttpRequest(line string) {
@@ -302,7 +310,7 @@ func (r *httpRequester) flushFailureTapePeriodically() {
 		}
 	}
 
-	log.Printf("[INFO] failure tape flushed; failedHttpRequestCount=%v", r.failedHttpRequestCount.Load())
+	log.Printf("[INFO] failure tape flushed; failedHttpRequestCount=%v", r.stats.failed.Load())
 }
 
 func (r *httpRequester) saveTapePositionPeriodically() {
@@ -340,22 +348,22 @@ func (r *httpRequester) logProgress() {
 		}
 
 		tapePosition := r.tapePosition.Load()
-		concurrency := r.concurrency.Load()
-		total := r.httpRequestCount.Load()
+		concurrency := r.stats.concurrency.Load()
+		total := r.stats.total.Load()
 		qps := total - prevTotal
 		prevTotal = total
-		successful := r.successfulHttpRequestCount.Load()
-		failed := r.failedHttpRequestCount.Load()
+		successful := r.stats.successful.Load()
+		failed := r.stats.failed.Load()
 		successRate := float64(successful) / (float64(successful) + float64(failed))
 
-		var name string
+		var title string
 		if next {
-			name = "current progress"
+			title = "current progress"
 		} else {
-			name = "final progress"
+			title = "final progress"
 		}
 		log.Printf("[INFO] %s: tapePosition=%d qps=%d concurrency=%d successful=%d failed=%d successRate=%.2f",
-			name, tapePosition, qps, concurrency, successful, failed, successRate)
+			title, tapePosition, qps, concurrency, successful, failed, successRate)
 	}
 }
 
