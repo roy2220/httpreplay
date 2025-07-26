@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -30,23 +31,25 @@ func main() {
 		QpsLimit         int    `arg:"-q,--" placeholder:"QPS" help:"The limt of qps, no limit if less than 1" default:"1"`
 		ConcurrencyLimit int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"The limt of concurrency, no limit if less than 1" default:"1"`
 		Timeout          int    `arg:"-t,--" placeholder:"TIMEOUT" help:"The timeout of http request in seconds, no timeout if less than 1" default:"10"`
-		DryRun           bool   `arg:"-d,--" placeholder:"DRY-RUN" help:"dry-run mode" default:"false"`
+		DryRun           bool   `arg:"-d,--" help:"dry-run mode" default:"false"`
 	}
-	parser := arg.MustParse(&args)
-	if args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
+	if parser := arg.MustParse(&args); args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
 		parser.Fail("should limit at least one of qps or concurrency")
 	}
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-
-	httpRequester, err := newHttpRequester(args.TapeFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, args.DryRun, c)
+	httpRequester, err := newHttpRequester(args.TapeFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, args.DryRun)
 	if err != nil {
 		log.Fatalf("[FATAL] failed to create http requester: %v", err)
 	}
 	defer httpRequester.Close()
 
-	<-c
+	exit := make(chan os.Signal, 1)
+	signal.Notify(exit, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case <-httpRequester.Idleness():
+	case <-exit:
+	}
 }
 
 const (
@@ -69,11 +72,11 @@ type httpRequester struct {
 	concurrencyLimit int
 	httpClient       *http.Client
 	dryRun           bool
-	idleSignal       chan<- os.Signal
 
 	backgroundCtx context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
+	idleness      chan struct{}
 
 	concurrency            atomic.Int64
 	requestCount           atomic.Int64
@@ -86,7 +89,6 @@ func newHttpRequester(
 	qpsLimit, concurrencyLimit int,
 	timeout time.Duration,
 	dryRun bool,
-	idleSignal chan<- os.Signal,
 ) (_ *httpRequester, returnedErr error) {
 	tapeFile, err := os.Open(tapeFileName)
 	if err != nil {
@@ -136,8 +138,8 @@ func newHttpRequester(
 
 			Timeout: timeout,
 		},
-		dryRun:     dryRun,
-		idleSignal: idleSignal,
+		dryRun:   dryRun,
+		idleness: make(chan struct{}),
 	}
 	r.tapePosition.Store(int64(tapePosition))
 	r.start()
@@ -199,34 +201,29 @@ func (r *httpRequester) dispatchHttpRequests() {
 	}
 
 	for httpRequest, line := range readHttpRequests(r.tapeFile, int(r.tapePosition.Load())) {
-		if next := func() bool {
-			ok := acquireQpsToken()
-			if !ok {
-				return false
-			}
-
-			releaseConcurrencyToken, ok := acquireConcurrencyToken()
-			if !ok {
-				return false
-			}
-
-			r.tapePosition.Add(1)
-			r.wg.Add(1)
-			go func() {
-				defer releaseConcurrencyToken()
-				defer r.wg.Done()
-				r.doHttpRequest(httpRequest, line)
-			}()
-			return true
-		}(); !next {
+		ok := acquireQpsToken()
+		if !ok {
+			// exit
 			return
 		}
+
+		releaseConcurrencyToken, ok := acquireConcurrencyToken()
+		if !ok {
+			// exit
+			return
+		}
+
+		r.tapePosition.Add(1)
+		r.wg.Add(1)
+		go func() {
+			defer releaseConcurrencyToken()
+			defer r.wg.Done()
+			r.doHttpRequest(httpRequest, line)
+		}()
 	}
 
-	select {
-	case r.idleSignal <- syscall.Signal(0):
-	}
 	log.Printf("[INFO] all http requests have been processed")
+	close(r.idleness)
 }
 
 func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
@@ -263,19 +260,12 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 }
 
 func (r *httpRequester) recordFailedHttpRequest(line string) {
-	var err error
-
 	r.failureTapeLock.Lock()
 	_, err1 := r.failureTape.WriteString(line)
-	if err1 != nil {
-		err = err1
-	}
 	err2 := r.failureTape.WriteByte('\n')
-	if err2 != nil {
-		err = err2
-	}
 	r.failureTapeLock.Unlock()
 
+	err := errors.Join(err1, err2)
 	if err != nil {
 		log.Printf("[WARN] failed to write failure tape file: %v", err)
 	}
@@ -343,15 +333,26 @@ func (r *httpRequester) logStats() {
 	}
 }
 
+func (r *httpRequester) Idleness() <-chan struct{} { return r.idleness }
+
 func (r *httpRequester) Close() {
 	r.stop()
 
-	r.tapeFile.Close()
-	err := r.failureTape.Flush()
+	err := r.tapeFile.Close()
+	if err != nil {
+		log.Printf("[WARN] failed to close tape file: %v", err)
+	}
+
+	err = r.failureTape.Flush()
 	if err != nil {
 		log.Printf("[WARN] failed to flush failure tape: %v", err)
 	}
-	r.failureTapeFile.Close()
+
+	err = r.failureTapeFile.Close()
+	if err != nil {
+		log.Printf("[WARN] failed to close failure tape file: %v", err)
+	}
+
 	err = saveTapePosition(r.tapeFile.Name(), int(r.tapePosition.Load()), r.dryRun)
 	if err != nil {
 		log.Printf("[WARN] failed to save tape position: %v", err)
