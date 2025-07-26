@@ -200,6 +200,9 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 	}
 
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	for httpRequest, line := range readHttpRequests(r.tapeFile, int(r.tapePosition.Load())) {
 		ok := acquireQpsToken()
 		if !ok {
@@ -214,10 +217,10 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 
 		r.tapePosition.Add(1)
-		r.wg.Add(1)
+		wg.Add(1)
 		go func() {
 			defer releaseConcurrencyToken()
-			defer r.wg.Done()
+			defer wg.Done()
 			r.doHttpRequest(httpRequest, line)
 		}()
 	}
