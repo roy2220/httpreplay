@@ -49,6 +49,7 @@ func main() {
 	select {
 	case <-httpRequester.Idleness():
 	case <-exit:
+		log.Printf("[INFO] http replay is stopping...")
 	}
 }
 
@@ -78,10 +79,10 @@ type httpRequester struct {
 	wg            sync.WaitGroup
 	idleness      chan struct{}
 
-	concurrency            atomic.Int64
-	requestCount           atomic.Int64
-	successfulRequestCount atomic.Int64
-	failedRequestCount     atomic.Int64
+	concurrency                atomic.Int64
+	httpRequestCount           atomic.Int64
+	successfulHttpRequestCount atomic.Int64
+	failedHttpRequestCount     atomic.Int64
 }
 
 func newHttpRequester(
@@ -100,7 +101,9 @@ func newHttpRequester(
 		}
 	}()
 	tapePosition, err := loadTapePosition(tapeFileName, dryRun)
-	if err != nil {
+	if err == nil {
+		log.Printf("[INFO] tape position loaded; tapePosition=%v", tapePosition)
+	} else {
 		log.Printf("[WARN] failed to load tape position: %v", err)
 	}
 	failureTapeFileName := tapeFileName + failureTapeFileExt
@@ -170,11 +173,22 @@ func (r *httpRequester) start() {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		r.logStats()
+		r.logProgress()
 	}()
 }
 
 func (r *httpRequester) dispatchHttpRequests() {
+	var wg sync.WaitGroup
+	var noMoreHttpRequests bool
+	defer func() {
+		wg.Wait()
+		close(r.idleness)
+
+		if noMoreHttpRequests {
+			log.Printf("[INFO] no more http requests")
+		}
+	}()
+
 	acquireQpsToken := func() bool { return true }
 	if r.qpsLimit >= 1 {
 		limiter := ratelimit.New(r.qpsLimit)
@@ -200,9 +214,6 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 	}
 
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
 	for httpRequest, line := range readHttpRequests(r.tapeFile, int(r.tapePosition.Load())) {
 		ok := acquireQpsToken()
 		if !ok {
@@ -225,15 +236,14 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}()
 	}
 
-	log.Printf("[INFO] all http requests have been processed")
-	close(r.idleness)
+	noMoreHttpRequests = true
 }
 
 func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 	r.concurrency.Add(1)
 	defer r.concurrency.Add(-1)
 
-	r.requestCount.Add(1)
+	r.httpRequestCount.Add(1)
 	if r.dryRun {
 		if httpRequest.Body == nil {
 			log.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
@@ -242,24 +252,24 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 			rawBody := string(data)
 			log.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, rawBody)
 		}
-		r.successfulRequestCount.Add(1)
+		r.successfulHttpRequestCount.Add(1)
 		return
 	}
 
 	resp, err := r.httpClient.Do(httpRequest)
 	if err != nil {
-		r.failedRequestCount.Add(1)
+		r.failedHttpRequestCount.Add(1)
 		r.recordFailedHttpRequest(line)
 		return
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		r.failedRequestCount.Add(1)
+		r.failedHttpRequestCount.Add(1)
 		r.recordFailedHttpRequest(line)
 		return
 	}
-	r.successfulRequestCount.Add(1)
+	r.successfulHttpRequestCount.Add(1)
 }
 
 func (r *httpRequester) recordFailedHttpRequest(line string) {
@@ -277,10 +287,10 @@ func (r *httpRequester) flushFailureTapePeriodically() {
 	ticker := time.NewTicker(flushFailureTapeInterval)
 	defer ticker.Stop()
 
-	for {
+	for next := true; next; {
 		select {
-		case <-r.backgroundCtx.Done():
-			return
+		case <-r.idleness:
+			next = false
 		case <-ticker.C:
 		}
 
@@ -291,48 +301,61 @@ func (r *httpRequester) flushFailureTapePeriodically() {
 			log.Printf("[WARN] failed to flush failure tape: %v", err)
 		}
 	}
+
+	log.Printf("[INFO] failure tape flushed; failedHttpRequestCount=%v", r.failedHttpRequestCount.Load())
 }
 
 func (r *httpRequester) saveTapePositionPeriodically() {
 	ticker := time.NewTicker(saveTapePositionInterval)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-r.backgroundCtx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		err := saveTapePosition(r.tapeFile.Name(), int(r.tapePosition.Load()), r.dryRun)
-		if err != nil {
-			log.Printf("[WARN] failed to save tape position: %v", err)
-		}
-	}
-}
-
-func (r *httpRequester) logStats() {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	prevCount := int64(0)
+	var tapePosition int
 	for next := true; next; {
 		select {
-		case <-r.backgroundCtx.Done():
+		case <-r.idleness:
 			next = false
 		case <-ticker.C:
 		}
 
-		position := r.tapePosition.Load()
+		tapePosition = int(r.tapePosition.Load())
+		err := saveTapePosition(r.tapeFile.Name(), tapePosition, r.dryRun)
+		if err != nil {
+			log.Printf("[WARN] failed to save tape position: %v", err)
+		}
+	}
+
+	log.Printf("[INFO] tape position saved; tapePosition=%v", tapePosition)
+}
+
+func (r *httpRequester) logProgress() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	prevTotal := int64(0)
+	for next := true; next; {
+		select {
+		case <-r.idleness:
+			next = false
+		case <-ticker.C:
+		}
+
+		tapePosition := r.tapePosition.Load()
 		concurrency := r.concurrency.Load()
-		count := r.requestCount.Load()
-		qps := count - prevCount
-		prevCount = count
-		successfulCount := r.successfulRequestCount.Load()
-		failedCount := r.failedRequestCount.Load()
-		successRate := float64(successfulCount) / float64(count)
-		log.Printf("[INFO] position: %d, qps: %d, concurrency: %d, successful: %d, failed: %d, success rate: %.2f",
-			position, qps, concurrency, successfulCount, failedCount, successRate)
+		total := r.httpRequestCount.Load()
+		qps := total - prevTotal
+		prevTotal = total
+		successful := r.successfulHttpRequestCount.Load()
+		failed := r.failedHttpRequestCount.Load()
+		successRate := float64(successful) / (float64(successful) + float64(failed))
+
+		var name string
+		if next {
+			name = "current progress"
+		} else {
+			name = "final progress"
+		}
+		log.Printf("[INFO] %s: tapePosition=%d qps=%d concurrency=%d successful=%d failed=%d successRate=%.2f",
+			name, tapePosition, qps, concurrency, successful, failed, successRate)
 	}
 }
 
@@ -346,19 +369,9 @@ func (r *httpRequester) Close() {
 		log.Printf("[WARN] failed to close tape file: %v", err)
 	}
 
-	err = r.failureTape.Flush()
-	if err != nil {
-		log.Printf("[WARN] failed to flush failure tape: %v", err)
-	}
-
 	err = r.failureTapeFile.Close()
 	if err != nil {
 		log.Printf("[WARN] failed to close failure tape file: %v", err)
-	}
-
-	err = saveTapePosition(r.tapeFile.Name(), int(r.tapePosition.Load()), r.dryRun)
-	if err != nil {
-		log.Printf("[WARN] failed to save tape position: %v", err)
 	}
 }
 

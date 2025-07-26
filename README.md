@@ -1,82 +1,109 @@
-# HTTP Replay Tool
+# httpreplay
 
-This is a Go-based command-line tool for replaying HTTP requests from a tape file, with configurable QPS (queries per second) and concurrency limits. It processes HTTP requests, logs successes and failures, and saves failed requests to a separate file for further analysis.
+`httpreplay` is a CLI tool for replaying HTTP requests from a tape file, allowing you to simulate traffic with configurable QPS (queries per second), concurrency limits, and timeouts. It supports dry-run mode for testing and logs failed requests for easy debugging.
 
 ## Features
-- Reads HTTP requests from a specified tape file.
-- **Tracks and saves the position in the tape file for resuming.**
-- Logs failed requests to a `.httpreplay-failure` file.
-- Supports rate limiting (QPS) and concurrency control.
-- Configurable HTTP request timeout.
-- Displays real-time statistics (QPS, concurrency, success rate, etc.).
-- Graceful shutdown on SIGINT/SIGTERM signals.
 
-## Installation
-```bash
-go install github.com/roy2220/httpreplay
-```
+- Replay HTTP requests from a specified tape file.
+- Configurable QPS and concurrency limits.
+- Adjustable HTTP request timeout.
+- Dry-run mode to preview requests without sending them.
+- Logs failed requests to a failure tape file.
+- Tracks and saves progress for resumable operations.
+- Detailed progress logging with success rate and QPS metrics.
 
 ## Usage
-Run the tool with the following command:
+
+Run `httpreplay` with the required tape file and optional flags:
+
 ```bash
-./httpreplay TAPE-FILE [options]
+httpreplay TAPE-FILE [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-d]
 ```
 
 ### Arguments
-- **TAPE-FILE** (required): Path to the tape file containing HTTP requests. Each line should be a valid HTTP request in a format parseable by `shlex` (e.g., `curl`-like syntax: `URL -X METHOD -H "Header: Value"`).
-- **-q QPS**: Queries per second limit. Set to `< 1` for no limit (default: 1).
-- **-c CONCURRENCY**: Concurrent request limit. Set to `< 1` for no limit (default: 1).
-- **-t TIMEOUT**: HTTP request timeout in seconds. Set to `< 1` for no timeout (default: 10).
 
-**Note**: At least one of QPS or concurrency must be limited (i.e., both cannot be `< 1`).
+- **TAPE-FILE** (required): Path to the tape file containing HTTP requests. Each line should be a valid HTTP request (e.g., `curl`-like format: `URL [-X METHOD] [-H HEADER]... [-d DATA]`).
+- **-q, --qps QPS**: Queries per second limit (default: 1). Set to < 1 for no limit.
+- **-c, --concurrency CONCURRENCY**: Concurrent requests limit (default: 1). Set to < 1 for no limit.
+- **-t, --timeout TIMEOUT**: HTTP request timeout in seconds (default: 10). Set to < 1 for no timeout.
+- **-d, --dry-run**: Preview requests without sending them (default: false).
 
-### Example
-To replay requests from `requests.tape` with 10 QPS, 5 concurrent requests, and a 5-second timeout:
-```bash
-./httpreplay requests.tape -q 10 -c 5 -t 5
-```
+**Note**: At least one of QPS or concurrency must be limited (i.e., ≥ 1).
 
 ### Tape File Format
-The tape file should contain one HTTP request per line, formatted similarly to `curl` commands. Example:
-```
-http://example.com/api -X GET -H 'Authorization: Bearer token'
-http://example.com/post -X POST -H 'Content-Type: application/json' -d '{"hello":"world"}'
-```
 
-### Output
-- **Logs**: Real-time statistics are logged every second, showing:
-  - Current position in the tape file.
-  - QPS (requests per second).
-  - Current concurrency.
-  - Successful and failed request counts.
-  - Success rate.
-  Example log:
-  ```
-  [INFO] position: 100, qps: 8, concurrency: 5, successful: 95, failed: 5, success rate: 0.95
-  ```
-- **Failure File**: Failed requests are appended to `TAPE-FILE.httpreplay-failure`.
-- **Position File**: The current position in the tape file is saved to `TAPE-FILE.httpreplay-pos` every 200ms, allowing resumption after interruption.
+The tape file contains one HTTP request per line, in a `curl`-like format. Example:
 
-## Debugging
-Enable debug mode to log detailed HTTP request information:
-```bash
-DEBUG=1 ./httpreplay requests.tape
+```
+https://example.com/api -X POST -H "Content-Type: application/json" -d '{"key":"value"}'
+https://example.com/get -X GET -H "Authorization: Bearer token"
 ```
 
-## Stopping the Tool
-- Press `Ctrl+C` (SIGINT) or send a `SIGTERM` to stop the tool gracefully.
-- The tool will:
-  - Save the current tape file position.
-  - Flush failed requests to the failure file.
-  - Close all files and exit.
+Each line is parsed into an HTTP request with method, URL, headers, and optional body.
+
+### Example Commands
+
+1. Replay requests with a QPS limit of 10 and concurrency of 5:
+   ```bash
+   httpreplay requests.txt -q 10 -c 5
+   ```
+
+2. Run in dry-run mode with a 30-second timeout:
+   ```bash
+   httpreplay requests.txt -t 30 -d
+   ```
+
+3. Replay without QPS or concurrency limits:
+   ```bash
+   httpreplay requests.txt -q 0 -c 0
+   ```
+
+### Output Files
+
+- **Failure Tape File** (`TAPE-FILE.httpreplay-failure`): Stores failed requests for retry or analysis.
+- **Position File** (`TAPE-FILE.httpreplay-pos`): Tracks the last processed request index for resuming.
+- **Dry-run Position File** (`TAPE-FILE.httpreplay-pos.dry-run`): Used in dry-run mode to avoid overwriting the main position file.
+
+### Logging
+
+- **Progress Logs**: Displayed every second, showing tape position, QPS, concurrency, successful/failed requests, and success rate.
+- **Debug Logs**: Enable with `DEBUG=1` environment variable to log parsed HTTP requests.
+- **Errors/Warnings**: Issues like file read errors or parsing failures are logged with `[WARN]` or `[FATAL]`.
+
+Example progress log:
+```
+[INFO] current progress: tapePosition=100 qps=50 concurrency=5 successful=95 failed=5 successRate=0.95
+```
+
+## Quick Start
+
+1. Create a tape file (`requests.txt`) with HTTP requests:
+   ```
+   https://example.com/api -X GET
+   https://example.com/api -X POST -d '{"data":"test"}'
+   ```
+
+2. Run the tool:
+   ```bash
+   httpreplay requests.txt -q 5 -c 2 -t 15
+   ```
+
+3. Check logs and the failure tape file (`requests.txt.httpreplay-failure`) for any failed requests.
 
 ## Notes
-- The tool resumes from the last saved position in `TAPE-FILE.httpreplay-pos` if available.
-- Failed requests are those that result in errors or non-2xx HTTP status codes.
-- Ensure the tape file is accessible and properly formatted to avoid parsing errors.
-- Large tape files are supported, with a 16MB buffer for reading and writing.
+
+- The tool resumes from the last processed request using the position file.
+- Failed requests are appended to the failure tape file every 500ms.
+- Progress is saved every 200ms to ensure resumability.
+- Use `Ctrl+C` or `SIGTERM` to gracefully stop the tool, ensuring files are closed properly.
 
 ## Troubleshooting
-- **"failed to parse http request"**: Check the tape file for invalid request formats.
-- **"failed to open tape file"**: Verify the file path and permissions.
-- **High failure rate**: Check network connectivity, server availability, or increase the timeout with `-t`.
+
+- **Invalid tape file format**: Ensure each line follows the `curl`-like syntax. Check logs for parsing errors.
+- **High failure rate**: Verify the target server is reachable and check the failure tape file for details.
+- **Resuming issues**: Ensure the position file is not corrupted or manually deleted.
+- **Performance issues**: Adjust QPS and concurrency limits to balance load and stability.
+
+## License
+
+MIT License. See `LICENSE` for details.
