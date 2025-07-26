@@ -49,7 +49,7 @@ func main() {
 	select {
 	case <-httpRequester.Idleness():
 	case <-exit:
-		log.Printf("[INFO] http replay is stopping...")
+		log.Printf("[INFO] http requester is stopping...")
 	}
 }
 
