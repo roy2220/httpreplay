@@ -17,16 +17,17 @@
 Run `httpreplay` with the required tape file and optional flags:
 
 ```bash
-httpreplay TAPE-FILE [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-d]
+httpreplay TAPE-FILE [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d]
 ```
 
 ### Arguments
 
 - **TAPE-FILE** (required): Path to the tape file containing HTTP requests. Each line should be a valid HTTP request (e.g., `curl`-like format: `URL [-X METHOD] [-H HEADER]... [-d DATA]`).
-- **-q, --qps QPS**: Queries per second limit (default: 1). Set to < 1 for no limit.
-- **-c, --concurrency CONCURRENCY**: Concurrent requests limit (default: 1). Set to < 1 for no limit.
-- **-t, --timeout TIMEOUT**: HTTP request timeout in seconds (default: 10). Set to < 1 for no timeout.
-- **-d, --dry-run**: Preview requests without sending them (default: false).
+- **-q QPS**: Queries per second limit (default: 1). Set to < 1 for no limit.
+- **-c CONCURRENCY**: Concurrent requests limit (default: 1). Set to < 1 for no limit.
+- **-t TIMEOUT**: HTTP request timeout in seconds (default: 10). Set to < 1 for no timeout.
+- **-f**: Follow HTTP redirects (default: false).
+- **-d**: Preview requests without sending them (default: false).
 
 **Note**: At least one of QPS or concurrency must be limited (i.e., ≥ 1).
 

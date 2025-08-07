@@ -27,17 +27,25 @@ import (
 
 func main() {
 	var args struct {
-		TapeFileName     string `arg:"required,positional" placeholder:"TAPE-FILE" help:"The tape file containing http requests"`
-		QpsLimit         int    `arg:"-q,--" placeholder:"QPS" help:"The limt of qps, no limit if less than 1" default:"1"`
-		ConcurrencyLimit int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"The limt of concurrency, no limit if less than 1" default:"1"`
-		Timeout          int    `arg:"-t,--" placeholder:"TIMEOUT" help:"The timeout of http request in seconds, no timeout if less than 1" default:"10"`
+		TapeFileName     string `arg:"required,positional" placeholder:"TAPE-FILE" help:"the tape file containing HTTP requests"`
+		QpsLimit         int    `arg:"-q,--" placeholder:"QPS" help:"the limt of qps, no limit if less than 1" default:"1"`
+		ConcurrencyLimit int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"the limt of concurrency, no limit if less than 1" default:"1"`
+		Timeout          int    `arg:"-t,--" placeholder:"TIMEOUT" help:"the timeout of HTTP request in seconds, no timeout if less than 1" default:"10"`
+		FollowRedirects  bool   `arg:"-f,--" help:"follow HTTP redirects" default:"false"`
 		DryRun           bool   `arg:"-d,--" help:"dry-run mode" default:"false"`
 	}
 	if parser := arg.MustParse(&args); args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
 		parser.Fail("should limit at least one of qps or concurrency")
 	}
 
-	httpRequester, err := newHttpRequester(args.TapeFileName, args.QpsLimit, args.ConcurrencyLimit, time.Duration(args.Timeout)*time.Second, args.DryRun)
+	httpRequester, err := newHttpRequester(
+		args.TapeFileName,
+		args.QpsLimit,
+		args.ConcurrencyLimit,
+		time.Duration(args.Timeout)*time.Second,
+		args.FollowRedirects,
+		args.DryRun,
+	)
 	if err != nil {
 		log.Fatalf("[FATAL] failed to create http requester: %v", err)
 	}
@@ -91,6 +99,7 @@ func newHttpRequester(
 	tapeFileName string,
 	qpsLimit, concurrencyLimit int,
 	timeout time.Duration,
+	followRedirects bool,
 	dryRun bool,
 ) (_ *httpRequester, returnedErr error) {
 	tapeFile, err := os.Open(tapeFileName)
@@ -121,30 +130,34 @@ func newHttpRequester(
 	if timeout < 0 {
 		timeout = 0
 	}
+	httpClient := http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   timeout,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          10000,
+			MaxIdleConnsPerHost:   max(10, concurrencyLimit),
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   timeout,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+
+		Timeout: timeout,
+	}
+	if !followRedirects {
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 	r := &httpRequester{
 		tapeFile:         tapeFile,
 		failureTapeFile:  failureTapeFile,
 		failureTape:      bufio.NewWriterSize(failureTapeFile, bufferSize),
 		qpsLimit:         qpsLimit,
 		concurrencyLimit: concurrencyLimit,
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: (&net.Dialer{
-					Timeout:   timeout,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          10000,
-				MaxIdleConnsPerHost:   max(10, concurrencyLimit),
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   timeout,
-				ExpectContinueTimeout: 1 * time.Second,
-			},
-
-			Timeout: timeout,
-		},
-		dryRun:   dryRun,
-		idleness: make(chan struct{}),
+		httpClient:       &httpClient,
+		dryRun:           dryRun,
+		idleness:         make(chan struct{}),
 	}
 	r.tapePosition.Store(int64(tapePosition))
 	r.start()
