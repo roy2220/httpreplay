@@ -12,6 +12,10 @@
 - Logs failed requests to a failure tape file.
 - Detailed progress logging with success rate and QPS metrics.
 
+## Installation
+
+[**Download the latest binary**](https://github.com/roy2220/httpreplay/releases)
+
 ## Usage
 
 Run `httpreplay` with the required tape file and optional flags:
