@@ -84,9 +84,11 @@ Example progress log:
 
 1. Create a tape file (`requests.txt`) with HTTP requests:
    ```
+   https://example.com/api
    https://example.com/api -X GET
    https://example.com/api -X POST -d '{"data":"test"}'
    ```
+   **Note**: The default method is `GET` if not specified.
 
 2. Run the tool:
    ```bash
