@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/alexflint/go-arg"
+	"github.com/edsrzf/mmap-go"
 	"github.com/google/shlex"
 	"go.uber.org/ratelimit"
 )
@@ -62,25 +63,24 @@ func main() {
 }
 
 const (
-	bufferSize               = 16 * 1024 * 1024
-	failureTapeFileExt       = ".httpreplay-failure"
 	tapePositionFileExt      = ".httpreplay-pos"
+	failureTapeFileExt       = ".httpreplay-failure"
+	failureTapeBufferSize    = 16 * 1024 * 1024
 	flushFailureTapeInterval = 500 * time.Millisecond
-	saveTapePositionInterval = 200 * time.Millisecond
 )
 
 var debug = os.Getenv("DEBUG") == "1"
 
 type httpRequester struct {
-	tapeFile         *os.File
-	tapePosition     atomic.Int64
-	failureTapeFile  *os.File
-	failureTapeLock  sync.Mutex
-	failureTape      *bufio.Writer
-	qpsLimit         int
-	concurrencyLimit int
-	httpClient       *http.Client
-	dryRun           bool
+	tapeFile            *os.File
+	tapePositionTracker *tapePositionTracker
+	failureTapeFile     *os.File
+	failureTapeLock     sync.Mutex
+	failureTape         *bufio.Writer
+	qpsLimit            int
+	concurrencyLimit    int
+	httpClient          *http.Client
+	dryRun              bool
 
 	backgroundCtx context.Context
 	cancel        context.CancelFunc
@@ -111,12 +111,19 @@ func newHttpRequester(
 			tapeFile.Close()
 		}
 	}()
-	tapePosition, err := loadTapePosition(tapeFileName, dryRun)
-	if err == nil {
-		log.Printf("[INFO] tape position loaded; tapePosition=%v", tapePosition)
-	} else {
-		log.Printf("[WARN] failed to load tape position: %v", err)
+	tapePositionFileName := tapeFileName + tapePositionFileExt
+	if dryRun {
+		tapePositionFileName += ".dry-run"
 	}
+	tapePositionTracker, err := newTapePositionTracker(tapePositionFileName)
+	if err != nil {
+		return nil, fmt.Errorf("open tape position file %q: %w", tapePositionFileName, err)
+	}
+	defer func() {
+		if returnedErr != nil {
+			tapePositionTracker.Close()
+		}
+	}()
 	failureTapeFileName := tapeFileName + failureTapeFileExt
 	failureTapeFile, err := os.OpenFile(failureTapeFileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
@@ -150,16 +157,16 @@ func newHttpRequester(
 		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
 	r := &httpRequester{
-		tapeFile:         tapeFile,
-		failureTapeFile:  failureTapeFile,
-		failureTape:      bufio.NewWriterSize(failureTapeFile, bufferSize),
-		qpsLimit:         qpsLimit,
-		concurrencyLimit: concurrencyLimit,
-		httpClient:       &httpClient,
-		dryRun:           dryRun,
-		idleness:         make(chan struct{}),
+		tapeFile:            tapeFile,
+		tapePositionTracker: tapePositionTracker,
+		failureTapeFile:     failureTapeFile,
+		failureTape:         bufio.NewWriterSize(failureTapeFile, failureTapeBufferSize),
+		qpsLimit:            qpsLimit,
+		concurrencyLimit:    concurrencyLimit,
+		httpClient:          &httpClient,
+		dryRun:              dryRun,
+		idleness:            make(chan struct{}),
 	}
-	r.tapePosition.Store(int64(tapePosition))
 	r.start()
 	return r, nil
 }
@@ -177,12 +184,6 @@ func (r *httpRequester) start() {
 	go func() {
 		defer r.wg.Done()
 		r.flushFailureTapePeriodically()
-	}()
-
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
-		r.saveTapePositionPeriodically()
 	}()
 
 	r.wg.Add(1)
@@ -229,7 +230,9 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 	}
 
-	for httpRequest, line := range readHttpRequests(r.tapeFile, int(r.tapePosition.Load())) {
+	fmt.Println("===== Feel free to stop the program with CTRL+C; progress will be saved. =====")
+
+	for httpRequest, line := range readHttpRequests(r.tapeFile, int(r.tapePositionTracker.TapePosition())) {
 		ok := acquireQpsToken()
 		if !ok {
 			// exit
@@ -242,11 +245,13 @@ func (r *httpRequester) dispatchHttpRequests() {
 			return
 		}
 
-		r.tapePosition.Add(1)
+		r.tapePositionTracker.IncTapePosition()
 		wg.Add(1)
 		go func() {
-			defer releaseConcurrencyToken()
-			defer wg.Done()
+			defer func() {
+				wg.Done()
+				releaseConcurrencyToken()
+			}()
 			r.doHttpRequest(httpRequest, line)
 		}()
 	}
@@ -326,28 +331,6 @@ func (r *httpRequester) flushFailureTapePeriodically() {
 	log.Printf("[INFO] failure tape flushed; failedHttpRequestCount=%v", r.stats.failed.Load())
 }
 
-func (r *httpRequester) saveTapePositionPeriodically() {
-	ticker := time.NewTicker(saveTapePositionInterval)
-	defer ticker.Stop()
-
-	var tapePosition int
-	for next := true; next; {
-		select {
-		case <-r.idleness:
-			next = false
-		case <-ticker.C:
-		}
-
-		tapePosition = int(r.tapePosition.Load())
-		err := saveTapePosition(r.tapeFile.Name(), tapePosition, r.dryRun)
-		if err != nil {
-			log.Printf("[WARN] failed to save tape position: %v", err)
-		}
-	}
-
-	log.Printf("[INFO] tape position saved; tapePosition=%v", tapePosition)
-}
-
 func (r *httpRequester) logProgress() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -360,7 +343,7 @@ func (r *httpRequester) logProgress() {
 		case <-ticker.C:
 		}
 
-		tapePosition := r.tapePosition.Load()
+		tapePosition := r.tapePositionTracker.TapePosition()
 		concurrency := r.stats.concurrency.Load()
 		total := r.stats.total.Load()
 		qps := total - prevTotal
@@ -390,6 +373,11 @@ func (r *httpRequester) Close() {
 		log.Printf("[WARN] failed to close tape file: %v", err)
 	}
 
+	err = r.tapePositionTracker.Close()
+	if err != nil {
+		log.Printf("[WARN] failed to close tape position file: %v", err)
+	}
+
 	err = r.failureTapeFile.Close()
 	if err != nil {
 		log.Printf("[WARN] failed to close failure tape file: %v", err)
@@ -401,42 +389,103 @@ func (r *httpRequester) stop() {
 	r.wg.Wait()
 }
 
-func loadTapePosition(tapeFileName string, dryRun bool) (int, error) {
-	tapePositionFileName := makeTapePositionFileName(tapeFileName, dryRun)
-	data, err := os.ReadFile(tapePositionFileName)
+type tapePositionTracker struct {
+	f *os.File
+	m mmap.MMap
+
+	lock         sync.Mutex
+	tapePosition uint32
+	buffer       *[10]byte
+}
+
+func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker, returnedErr error) {
+	f, err := os.OpenFile(tapePositionFileName, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
+		return nil, err
+	}
+	defer func() {
+		if returnedErr != nil {
+			f.Close()
 		}
-		return 0, err
-	}
-	tapePositionStr := string(data)
-	tapePosition, err := strconv.ParseUint(tapePositionStr, 10, 32)
+	}()
+
+	data, err := io.ReadAll(f)
 	if err != nil {
-		return 0, fmt.Errorf("invalid tape position %q from file %q", tapePositionStr, tapePositionFileName)
+		return nil, err
 	}
-	return int(tapePosition), nil
+	var tapePosition uint32
+	if len(data) >= 1 {
+		tapePositionStr := string(data)
+		n, err := strconv.ParseUint(strings.TrimSpace(tapePositionStr), 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid tape position %q", tapePositionStr)
+		}
+		tapePosition = uint32(n)
+
+		_, err = f.Seek(0, 0)
+		if err != nil {
+			return nil, err
+		}
+		err = f.Truncate(0)
+		if err != nil {
+			return nil, err
+		}
+	}
+	_, err = fmt.Fprintf(f, "%010d", tapePosition)
+	if err != nil {
+		return nil, err
+	}
+	err = f.Sync()
+	if err != nil {
+		return nil, err
+	}
+
+	m, err := mmap.Map(f, mmap.RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if returnedErr != nil {
+			m.Unmap()
+		}
+	}()
+	buffer := (*[10]byte)(m)
+
+	return &tapePositionTracker{
+		f:            f,
+		m:            m,
+		tapePosition: tapePosition,
+		buffer:       buffer,
+	}, nil
 }
 
-func saveTapePosition(tapeFileName string, tapePosition int, dryRun bool) error {
-	tapePositionFileName := makeTapePositionFileName(tapeFileName, dryRun)
-	tapePositionStr := strconv.FormatUint(uint64(tapePosition), 10)
-	err := os.WriteFile(tapePositionFileName, []byte(tapePositionStr), 0644)
-	return err
+func (t *tapePositionTracker) Close() error {
+	t.buffer = nil
+	err1 := t.m.Flush()
+	err2 := t.m.Unmap()
+	err3 := t.f.Close()
+	return errors.Join(err1, err2, err3)
 }
 
-func makeTapePositionFileName(tapeFileName string, dryRun bool) string {
-	tapePositionFileName := tapeFileName + tapePositionFileExt
-	if dryRun {
-		tapePositionFileName += ".dry-run"
-	}
-	return tapePositionFileName
+func (t *tapePositionTracker) TapePosition() uint32 {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	return t.tapePosition
+}
+
+func (t *tapePositionTracker) IncTapePosition() {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	t.tapePosition++
+	copy(t.buffer[:], fmt.Sprintf("%010d", t.tapePosition))
 }
 
 func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq2[*http.Request, string] {
 	return func(yield func(*http.Request, string) bool) {
 		scanner := bufio.NewScanner(reader)
-		scanner.Buffer(nil, bufferSize)
+		scanner.Buffer(nil, failureTapeBufferSize)
 
 		for scanner.Scan() {
 			if numberOfHttpRequestsToSkip >= 1 {

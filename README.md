@@ -1,20 +1,25 @@
 # httpreplay
 
-`httpreplay` is a CLI tool for replaying HTTP requests from a tape file, allowing you to simulate traffic with configurable QPS (queries per second), concurrency limits, and timeouts. It supports dry-run mode for testing and logs failed requests for easy debugging.
+`httpreplay` is a **high-performance, resumable** command-line interface (CLI) tool for replaying HTTP requests from a tape file. It efficiently simulates traffic while enforcing configurable **QPS** (queries per second) and **concurrency** limits.
 
 ## Features
 
-- Replay HTTP requests from a specified tape file.
-- **Tracks and saves progress for resumable operations.**
-- Configurable QPS and concurrency limits.
+- **Resumable Operations**: Automatically tracks and saves the last processed request position using an **atomic position file (mmap-based)**, allowing for safe, interruption-tolerant restarts (e.g., after `Ctrl+C` or system failure).
+- Replay HTTP requests from a specified tape file (in a `curl`-like format).
+- Configurable **QPS** and **concurrency** limits.
 - Adjustable HTTP request timeout.
 - Dry-run mode to preview requests without sending them.
-- Logs failed requests to a failure tape file.
-- Detailed progress logging with success rate and QPS metrics.
+- Logs failed requests to a dedicated failure tape file for easy retry or analysis.
+- Detailed progress logging with real-time success rate and QPS metrics.
+- **Graceful Shutdown**: Handles `SIGINT` and `SIGTERM` to ensure all state and logs are properly saved.
+
+---
 
 ## Installation
 
 [**Download the latest binary**](https://github.com/roy2220/httpreplay/releases)
+
+---
 
 ## Usage
 
@@ -22,94 +27,96 @@ Run `httpreplay` with the required tape file and optional flags:
 
 ```bash
 httpreplay TAPE-FILE [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d]
-```
+````
 
 ### Arguments
 
-- **TAPE-FILE** (required): Path to the tape file containing HTTP requests. Each line should be a valid HTTP request (e.g., `curl`-like format: `URL [-X METHOD] [-H HEADER]... [-d DATA]`).
-- **-q QPS**: Queries per second limit (default: 1). Set to < 1 for no limit.
-- **-c CONCURRENCY**: Concurrent requests limit (default: 1). Set to < 1 for no limit.
-- **-t TIMEOUT**: HTTP request timeout in seconds (default: 10). Set to < 1 for no timeout.
-- **-f**: Follow HTTP redirects (default: false).
-- **-d**: Preview requests without sending them (default: false).
+| Argument | Description | Default |
+| :--- | :--- | :--- |
+| **TAPE-FILE** (required) | Path to the tape file containing HTTP requests. | |
+| **-q QPS** | Queries per second limit. Set to `< 1` for no limit. | `1` |
+| **-c CONCURRENCY** | Concurrent requests limit. Set to `< 1` for no limit. | `1` |
+| **-t TIMEOUT** | HTTP request timeout in seconds. Set to `< 1` for no timeout. | `10` |
+| **-f** | Follow HTTP redirects. | `false` |
+| **-d** | **Dry-run mode**: Preview requests without sending them. | `false` |
 
-**Note**: At least one of QPS or concurrency must be limited (i.e., ≥ 1).
+> **Note**: At least one of QPS or concurrency must be limited (i.e., $\ge 1$).
 
-### Tape File Format
+-----
 
-The tape file contains one HTTP request per line, in a `curl`-like format. Example:
+## Tape File Format
+
+The tape file contains **one HTTP request per line**, in a format similar to `curl` arguments. `httpreplay` uses a robust parser to interpret the line into an HTTP request with method, URL, headers, and optional body.
+
+**Key Flags Supported:**
+
+- `-X`, `--request`: HTTP method (e.g., `POST`, `PUT`). Default is `GET`.
+- `-H`, `--header`: Header (e.g., `"Content-Type: application/json"`).
+- `-d`, `--data`: Request body/data.
+
+### Example Tape File (`requests.txt`)
 
 ```
-https://example.com/api -X POST -H "Content-Type: application/json" -d '{"key":"value"}'
-https://example.com/get -X GET -H "Authorization: Bearer token"
+https://example.com/api/status
+https://example.com/api/post -X POST -H "Content-Type: application/json" -d '{"key":"value"}'
+https://example.com/api/auth -X GET -H "Authorization: Bearer token"
 ```
 
-Each line is parsed into an HTTP request with method, URL, headers, and optional body.
+-----
 
-### Example Commands
+## Quick Start & Examples
 
-1. Replay requests with a QPS limit of 10 and concurrency of 5:
-   ```bash
-   httpreplay requests.txt -q 10 -c 5
-   ```
+1.  **Replay with limits (QPS=10, Concurrency=5):**
 
-2. Run in dry-run mode with a 30-second timeout:
-   ```bash
-   httpreplay requests.txt -t 30 -d
-   ```
+    ```bash
+    httpreplay requests.txt -q 10 -c 5
+    ```
 
-3. Replay without QPS or concurrency limits:
-   ```bash
-   httpreplay requests.txt -q 0 -c 0
-   ```
+2.  **Dry-run with a 30-second timeout:**
+
+    ```bash
+    httpreplay requests.txt -t 30 -d
+    ```
+
+3.  **Replay without QPS or concurrency limits (maximum throughput):**
+
+    ```bash
+    httpreplay requests.txt -q 0 -c 0
+    ```
+
+> **Tip**: You can stop the process safely with **`Ctrl+C`**. It will save its progress and can resume when run again.
 
 ### Output Files
 
-- **Failure Tape File** (`TAPE-FILE.httpreplay-failure`): Stores failed requests for retry or analysis.
-- **Position File** (`TAPE-FILE.httpreplay-pos`): Tracks the last processed request index for resuming.
-- **Dry-run Position File** (`TAPE-FILE.httpreplay-pos.dry-run`): Used in dry-run mode to avoid overwriting the main position file.
+`httpreplay` creates companion files next to your `TAPE-FILE` to manage state:
 
-### Logging
+- **Failure Tape File** (`TAPE-FILE.httpreplay-failure`): Stores the raw lines of any failed requests for later analysis or retry. *Flushed every 500ms.*
+- **Position File** (`TAPE-FILE.httpreplay-pos`): Tracks the last processed request index for resuming. *Uses memory-mapping for atomic, resilient updates.*
+- **Dry-run Position File** (`TAPE-FILE.httpreplay-pos.dry-run`): A separate position file is used when running in dry-run mode (`-d`) to prevent overwriting the main position file.
 
-- **Progress Logs**: Displayed every second, showing tape position, QPS, concurrency, successful/failed requests, and success rate.
-- **Debug Logs**: Enable with `DEBUG=1` environment variable to log parsed HTTP requests.
-- **Errors/Warnings**: Issues like file read errors or parsing failures are logged with `[WARN]` or `[FATAL]`.
+-----
 
-Example progress log:
+## Logging
+
+- **Progress Logs**: Displayed every second, showing the tape position, real-time QPS, current concurrency, successful/failed counts, and success rate.
+- **Debug Logs**: Enable verbose logging for parsed HTTP requests by setting the environment variable `DEBUG=1`.
+- **Errors/Warnings**: Logged with `[WARN]` or `[FATAL]` for file issues, parsing failures, etc.
+
+**Example Progress Log:**
+
 ```
 [INFO] current progress: tapePosition=100 qps=50 concurrency=5 successful=95 failed=5 successRate=0.95
 ```
 
-## Quick Start
-
-1. Create a tape file (`requests.txt`) with HTTP requests:
-   ```
-   https://example.com/api
-   https://example.com/api -X GET
-   https://example.com/api -X POST -d '{"data":"test"}'
-   ```
-   **Note**: The default method is `GET` if not specified.
-
-2. Run the tool:
-   ```bash
-   httpreplay requests.txt -q 5 -c 2 -t 15
-   ```
-
-3. Check logs and the failure tape file (`requests.txt.httpreplay-failure`) for any failed requests.
-
-## Notes
-
-- The tool resumes from the last processed request using the position file.
-- Failed requests are appended to the failure tape file every 500ms.
-- Progress is saved every 200ms to ensure resumability.
-- Use `Ctrl+C` or `SIGTERM` to gracefully stop the tool, ensuring files are closed properly.
+-----
 
 ## Troubleshooting
 
-- **Invalid tape file format**: Ensure each line follows the `curl`-like syntax. Check logs for parsing errors.
-- **High failure rate**: Verify the target server is reachable and check the failure tape file for details.
-- **Resuming issues**: Ensure the position file is not corrupted or manually deleted.
-- **Performance issues**: Adjust QPS and concurrency limits to balance load and stability.
+- **Invalid Tape Format**: Ensure each line strictly adheres to the `curl`-like syntax. Check logs for parsing errors.
+- **Resuming Issues**: If the position file (`*.httpreplay-pos`) is manually edited or corrupted, delete it to restart the replay from the beginning.
+- **Performance**: If your failure rate is high or QPS is low, adjust the `-q` (QPS limit) and `-c` (concurrency limit) flags to balance the load on the target system.
+
+-----
 
 ## License
 
