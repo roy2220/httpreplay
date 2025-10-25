@@ -393,8 +393,7 @@ type tapePositionTracker struct {
 	f *os.File
 	m mmap.MMap
 
-	lock         sync.Mutex
-	tapePosition uint32
+	tapePosition atomic.Uint32
 	buffer       *[10]byte
 }
 
@@ -447,12 +446,13 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 	}()
 	buffer := (*[10]byte)(m)
 
-	return &tapePositionTracker{
-		f:            f,
-		m:            m,
-		tapePosition: tapePosition,
-		buffer:       buffer,
-	}, nil
+	t := &tapePositionTracker{
+		f:      f,
+		m:      m,
+		buffer: buffer,
+	}
+	t.tapePosition.Store(tapePosition)
+	return t, nil
 }
 
 func (t *tapePositionTracker) Close() error {
@@ -462,19 +462,11 @@ func (t *tapePositionTracker) Close() error {
 	return errors.Join(err1, err2)
 }
 
-func (t *tapePositionTracker) TapePosition() uint32 {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-
-	return t.tapePosition
-}
+func (t *tapePositionTracker) TapePosition() uint32 { return t.tapePosition.Load() }
 
 func (t *tapePositionTracker) IncTapePosition() {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-
-	t.tapePosition++
-	copy(t.buffer[:], fmt.Sprintf("%010d", t.tapePosition))
+	tapePosition := t.tapePosition.Add(1)
+	copy(t.buffer[:], fmt.Sprintf("%010d", tapePosition))
 }
 
 func readHttpRequests(reader io.Reader, bufferSize int, numberOfHttpRequestsToSkip int) iter.Seq2[*http.Request, string] {
