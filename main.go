@@ -390,25 +390,25 @@ func (r *httpRequester) stop() {
 }
 
 type tapePositionTracker struct {
-	f *os.File
-	m mmap.MMap
+	file *os.File
+	mMap mmap.MMap
 
 	tapePosition atomic.Uint32
 	buffer       *[10]byte
 }
 
 func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker, returnedErr error) {
-	f, err := os.OpenFile(tapePositionFileName, os.O_RDWR|os.O_CREATE, 0644)
+	file, err := os.OpenFile(tapePositionFileName, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if returnedErr != nil {
-			f.Close()
+			file.Close()
 		}
 	}()
 
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, err
 	}
@@ -421,34 +421,34 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 		}
 		tapePosition = uint32(n)
 
-		_, err = f.Seek(0, 0)
+		_, err = file.Seek(0, 0)
 		if err != nil {
 			return nil, err
 		}
-		err = f.Truncate(0)
+		err = file.Truncate(0)
 		if err != nil {
 			return nil, err
 		}
 	}
-	_, err = fmt.Fprintf(f, "%010d", tapePosition)
+	_, err = fmt.Fprintf(file, "%010d", tapePosition)
 	if err != nil {
 		return nil, err
 	}
 
-	m, err := mmap.Map(f, mmap.RDWR, 0)
+	mMap, err := mmap.Map(file, mmap.RDWR, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if returnedErr != nil {
-			m.Unmap()
+			mMap.Unmap()
 		}
 	}()
-	buffer := (*[10]byte)(m)
+	buffer := (*[10]byte)(mMap)
 
 	t := &tapePositionTracker{
-		f:      f,
-		m:      m,
+		file:   file,
+		mMap:   mMap,
 		buffer: buffer,
 	}
 	t.tapePosition.Store(tapePosition)
@@ -457,8 +457,8 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 
 func (t *tapePositionTracker) Close() error {
 	t.buffer = nil
-	err1 := t.m.Unmap()
-	err2 := t.f.Close()
+	err1 := t.mMap.Unmap()
+	err2 := t.file.Close()
 	return errors.Join(err1, err2)
 }
 
