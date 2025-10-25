@@ -63,9 +63,9 @@ func main() {
 }
 
 const (
+	tapeBufferSize           = 16 * 1024 * 1024
 	tapePositionFileExt      = ".httpreplay-pos"
 	failureTapeFileExt       = ".httpreplay-failure"
-	failureTapeBufferSize    = 16 * 1024 * 1024
 	flushFailureTapeInterval = 500 * time.Millisecond
 )
 
@@ -160,7 +160,7 @@ func newHttpRequester(
 		tapeFile:            tapeFile,
 		tapePositionTracker: tapePositionTracker,
 		failureTapeFile:     failureTapeFile,
-		failureTape:         bufio.NewWriterSize(failureTapeFile, failureTapeBufferSize),
+		failureTape:         bufio.NewWriterSize(failureTapeFile, tapeBufferSize),
 		qpsLimit:            qpsLimit,
 		concurrencyLimit:    concurrencyLimit,
 		httpClient:          &httpClient,
@@ -232,7 +232,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 
 	fmt.Println("===== Feel free to stop the program with CTRL+C; progress will be saved. =====")
 
-	for httpRequest, line := range readHttpRequests(r.tapeFile, int(r.tapePositionTracker.TapePosition())) {
+	for httpRequest, line := range readHttpRequests(r.tapeFile, tapeBufferSize, int(r.tapePositionTracker.TapePosition())) {
 		ok := acquireQpsToken()
 		if !ok {
 			// exit
@@ -435,10 +435,6 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 	if err != nil {
 		return nil, err
 	}
-	err = f.Sync()
-	if err != nil {
-		return nil, err
-	}
 
 	m, err := mmap.Map(f, mmap.RDWR, 0)
 	if err != nil {
@@ -461,10 +457,9 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 
 func (t *tapePositionTracker) Close() error {
 	t.buffer = nil
-	err1 := t.m.Flush()
-	err2 := t.m.Unmap()
-	err3 := t.f.Close()
-	return errors.Join(err1, err2, err3)
+	err1 := t.m.Unmap()
+	err2 := t.f.Close()
+	return errors.Join(err1, err2)
 }
 
 func (t *tapePositionTracker) TapePosition() uint32 {
@@ -482,10 +477,10 @@ func (t *tapePositionTracker) IncTapePosition() {
 	copy(t.buffer[:], fmt.Sprintf("%010d", t.tapePosition))
 }
 
-func readHttpRequests(reader io.Reader, numberOfHttpRequestsToSkip int) iter.Seq2[*http.Request, string] {
+func readHttpRequests(reader io.Reader, bufferSize int, numberOfHttpRequestsToSkip int) iter.Seq2[*http.Request, string] {
 	return func(yield func(*http.Request, string) bool) {
 		scanner := bufio.NewScanner(reader)
-		scanner.Buffer(nil, failureTapeBufferSize)
+		scanner.Buffer(nil, bufferSize)
 
 		for scanner.Scan() {
 			if numberOfHttpRequestsToSkip >= 1 {
