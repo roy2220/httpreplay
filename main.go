@@ -578,8 +578,8 @@ type tapePositionTracker struct {
 	file *os.File
 	mMap mmap.MMap
 
-	tapePosition atomic.Uint32
-	buffer       *[10]byte
+	tapePosition atomic.Int64
+	buffer       *[20]byte
 }
 
 func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker, returnedErr error) {
@@ -597,14 +597,13 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 	if err != nil {
 		return nil, err
 	}
-	var tapePosition uint32
+	var tapePosition int64
 	if len(data) >= 1 {
 		tapePositionStr := string(data)
-		n, err := strconv.ParseUint(strings.TrimSpace(tapePositionStr), 10, 32)
-		if err != nil {
+		tapePosition, err = strconv.ParseInt(strings.TrimSpace(tapePositionStr), 10, 64)
+		if err != nil || tapePosition < 0 {
 			return nil, fmt.Errorf("invalid tape position %q", tapePositionStr)
 		}
-		tapePosition = uint32(n)
 
 		_, err = file.Seek(0, 0)
 		if err != nil {
@@ -615,7 +614,9 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 			return nil, err
 		}
 	}
-	_, err = fmt.Fprintf(file, "%010d", tapePosition)
+	var buffer [20]byte
+	dumpTapePosition(tapePosition, &buffer)
+	_, err = file.Write(buffer[:])
 	if err != nil {
 		return nil, err
 	}
@@ -629,12 +630,11 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 			mMap.Unmap()
 		}
 	}()
-	buffer := (*[10]byte)(mMap)
 
 	t := &tapePositionTracker{
 		file:   file,
 		mMap:   mMap,
-		buffer: buffer,
+		buffer: (*[20]byte)(mMap),
 	}
 	t.tapePosition.Store(tapePosition)
 	return t, nil
@@ -647,9 +647,18 @@ func (t *tapePositionTracker) Close() error {
 	return errors.Join(err1, err2)
 }
 
-func (t *tapePositionTracker) TapePosition() uint32 { return t.tapePosition.Load() }
+func (t *tapePositionTracker) TapePosition() int64 { return t.tapePosition.Load() }
 
 func (t *tapePositionTracker) IncTapePosition() {
 	tapePosition := t.tapePosition.Add(1)
-	copy(t.buffer[:], fmt.Sprintf("%010d", tapePosition))
+	dumpTapePosition(tapePosition, t.buffer)
+}
+
+func dumpTapePosition(tapePosition int64, buffer *[20]byte) {
+	*buffer = [...]byte{'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0'}
+	i := len(buffer) - 1
+	for ; tapePosition >= 1; tapePosition /= 10 {
+		buffer[i] = '0' + byte(tapePosition%10)
+		i--
+	}
 }
