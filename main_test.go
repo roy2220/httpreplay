@@ -66,9 +66,9 @@ func TestNormal(t *testing.T) {
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
 %[1]s/api?v=1
-%[1]s/api?v=2 -H 'X-Foo: Bar'
-%[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=4 -X POST -d '{"key":"value"}' -H 'X-Hello: World'
+%[1]s/api?v=2 -H'X-Foo: Bar'
+%[1]s/api?v=3 -X=GET -H 'X-Foo: Bar'
+%[1]s/api?v=4 -H'X-Foo: Bar' --request POST --data='{"key": "value"}' --header 'X-Hello: World'
 `, server.URL), 0644)
 	require.NoError(t, err)
 
@@ -114,8 +114,8 @@ func TestNormal(t *testing.T) {
 	assert.Contains(t, requests, request{
 		Method: "POST",
 		URI:    "/api?v=4",
-		Header: http.Header{"X-Hello": []string{"World"}},
-		Body:   `{"key":"value"}`,
+		Header: http.Header{"X-Foo": []string{"Bar"}, "X-Hello": []string{"World"}},
+		Body:   `{"key": "value"}`,
 	})
 }
 
@@ -156,7 +156,7 @@ func TestFollowRedirects(t *testing.T) {
 %[1]s/api?v=1
 %[1]s/api?v=2 -H 'X-Foo: Bar'
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=4 -X POST -d '{"key":"value"}' -H 'X-Hello: World'
+%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'X-Hello: World'
 `, server.URL), 0644)
 	require.NoError(t, err)
 
@@ -222,7 +222,7 @@ func TestDryRun(t *testing.T) {
 %[1]s/api?v=1
 %[1]s/api?v=2 -H 'X-Foo: Bar'
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=4 -X POST -d '{"key":"value"}' -H 'X-Hello: World'
+%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'X-Hello: World'
 `, server.URL), 0644)
 	require.NoError(t, err)
 
@@ -289,7 +289,7 @@ func TestProgressResumption(t *testing.T) {
 %[1]s/api?v=1
 %[1]s/api?v=2 -H 'X-Foo: Bar'
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=4 -X POST -d '{"key":"value"}' -H 'X-Hello: World'
+%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'X-Hello: World'
 `, server.URL), 0644)
 	require.NoError(t, err)
 
@@ -347,7 +347,7 @@ func TestProgressResumption(t *testing.T) {
 		Method: "POST",
 		URI:    "/api?v=4",
 		Header: http.Header{"X-Hello": []string{"World"}},
-		Body:   `{"key":"value"}`,
+		Body:   `{"key": "value"}`,
 	})
 }
 
@@ -392,7 +392,7 @@ func TestFailureTape(t *testing.T) {
 %[1]s/api?v=1
 %[1]s/api?v=2 -H 'X-Foo: Bar'
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=4 -X POST -d '{"key":"value"}' -H 'X-Hello: World'
+%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'X-Hello: World'
 `, server.URL), 0644)
 	require.NoError(t, err)
 

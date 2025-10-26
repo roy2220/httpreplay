@@ -348,39 +348,77 @@ func (r *httpRequester) readHttpRequests() iter.Seq2[*http.Request, string] {
 }
 
 func (r *httpRequester) parseHttpRequest(line string) (*http.Request, error) {
-	var args struct {
-		URL    string   `arg:"required,positional"`
-		Method string   `arg:"-X,--request" default:"GET"`
-		Header []string `arg:"separate,-H,--header"`
-		Data   *string  `arg:"-d,--data"`
-	}
-	rawArgs, err := shlex.Split(line)
+	args, err := shlex.Split(line)
 	if err != nil {
 		return nil, fmt.Errorf("split line: %w", err)
 	}
-	parser, err := arg.NewParser(arg.Config{}, &args)
-	if err != nil {
-		return nil, fmt.Errorf("new argument parser: %w", err)
+	var curlCommand struct {
+		URL     *string
+		Request string
+		Header  []string
+		Data    *string
 	}
-	err = parser.Parse(rawArgs)
-	if err != nil {
-		return nil, fmt.Errorf("parse arguments: %w", err)
+	i := 0
+	n := len(args)
+	popNextArg := func() (string, bool) {
+		i++
+		if i < n {
+			return args[i], true
+		}
+		return "", false
 	}
+	for ; i < n; i++ {
+		arg := args[i]
+		if v, err, ok := getFlagValue(arg, "-X", "--request", popNextArg); ok {
+			if err != nil {
+				return nil, err
+			}
+			curlCommand.Request = v
+			continue
+		}
+		if v, err, ok := getFlagValue(arg, "-H", "--header", popNextArg); ok {
+			if err != nil {
+				return nil, err
+			}
+			curlCommand.Header = append(curlCommand.Header, v)
+			continue
+		}
+		if v, err, ok := getFlagValue(arg, "-d", "--data", popNextArg); ok {
+			if err != nil {
+				return nil, err
+			}
+			curlCommand.Data = &v
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return nil, fmt.Errorf("unsupported flag: %s", arg)
+		}
+		if curlCommand.URL == nil {
+			curlCommand.URL = &arg
+		}
+	}
+	if curlCommand.URL == nil {
+		return nil, fmt.Errorf("missing url")
+	}
+	if curlCommand.Request == "" {
+		curlCommand.Request = "GET"
+	}
+
 	var rawBody *string
 	var body io.Reader
-	if args.Data != nil {
-		rawBody = args.Data
+	if curlCommand.Data != nil {
+		rawBody = curlCommand.Data
 		body = strings.NewReader(*rawBody)
 	}
-	httpRequest, err := http.NewRequest(args.Method, args.URL, body)
+	httpRequest, err := http.NewRequest(curlCommand.Request, *curlCommand.URL, body)
 	if err != nil {
 		return nil, fmt.Errorf("new http request: %w", err)
 	}
-	if len(args.Header) >= 1 {
+	if len(curlCommand.Header) >= 1 {
 		reader := textproto.NewReader(
 			bufio.NewReader(
 				strings.NewReader(
-					strings.Join(args.Header, "\r\n") +
+					strings.Join(curlCommand.Header, "\r\n") +
 						"\r\n\r\n",
 				),
 			),
@@ -399,6 +437,32 @@ func (r *httpRequester) parseHttpRequest(line string) (*http.Request, error) {
 		}
 	}
 	return httpRequest, nil
+}
+
+func getFlagValue(arg, flagName, longFlagName string, popNextArg func() (string, bool)) (string, error, bool) {
+	longFlagMode := false
+	v := strings.TrimPrefix(arg, flagName)
+	if len(v) == len(arg) {
+		longFlagMode = true
+		v = strings.TrimPrefix(arg, longFlagName)
+	}
+	if len(v) == len(arg) {
+		return "", nil, false
+	}
+	if v == "" {
+		var ok bool
+		v, ok = popNextArg()
+		if !ok {
+			return "", fmt.Errorf("missing flag value for %s/%s", flagName, longFlagName), true
+		}
+	} else if v[0] == '=' {
+		v = v[1:]
+	} else {
+		if longFlagMode {
+			return "", nil, false
+		}
+	}
+	return v, nil, true
 }
 
 func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
