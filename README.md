@@ -1,5 +1,7 @@
 # httpreplay
 
+[![Coverage](./.badges/coverage.svg)](#)
+
 `httpreplay` is a **high-performance, resumable** command-line interface (CLI) tool for replaying HTTP requests from a tape file. It efficiently simulates traffic while enforcing configurable **QPS** (queries per second) and **concurrency** limits.
 
 ## Features
