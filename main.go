@@ -339,7 +339,7 @@ func (r *httpRequester) readTape() iter.Seq2[int64, string] {
 		scanner := bufio.NewScanner(r.tapeFile)
 		scanner.Buffer(nil, tapeBufferSize)
 
-		for tapePosition := int64(0); scanner.Scan(); tapePosition++ {
+		for tapePosition := int64(1); scanner.Scan(); tapePosition++ {
 			if tapePosition <= lastTapePosition {
 				continue
 			}
