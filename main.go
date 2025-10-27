@@ -13,12 +13,12 @@ import (
 	"net/textproto"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/alexflint/go-arg"
 	"github.com/edsrzf/mmap-go"
@@ -144,7 +144,7 @@ func newHttpRequester(
 	}
 	tapePositionTracker, err := newTapePositionTracker(tapePositionFileName)
 	if err != nil {
-		return nil, fmt.Errorf("open tape position file %q: %w", tapePositionFileName, err)
+		return nil, fmt.Errorf("create tape position tracker: %w", err)
 	}
 	defer func() {
 		if returnedErr != nil {
@@ -407,7 +407,7 @@ func parseCurlCommand(line string) (curlCommand, error) {
 			continue
 		}
 		if strings.HasPrefix(arg, "-") {
-			return curlCommand{}, fmt.Errorf("unsupported flag: %s", arg)
+			return curlCommand{}, fmt.Errorf("unsupported flag: %v", arg)
 		}
 		if curlCommand1.URL == nil {
 			curlCommand1.URL = &arg
@@ -436,7 +436,7 @@ func getFlagValue(arg, flagName, longFlagName string, popNextArg func() (string,
 		var ok bool
 		v, ok = popNextArg()
 		if !ok {
-			return "", fmt.Errorf("missing flag value for %s/%s", flagName, longFlagName), true
+			return "", fmt.Errorf("missing flag value for %v/%v", flagName, longFlagName), true
 		}
 	} else if v[0] == '=' {
 		v = v[1:]
@@ -586,7 +586,7 @@ func (r *httpRequester) logProgress() {
 		} else {
 			title = "final progress"
 		}
-		r.logger.Printf("[INFO] %s: tapePosition=%d qps=%d concurrency=%d successful=%d failed=%d successRate=%.2f",
+		r.logger.Printf("[INFO] %v: tapePosition=%v qps=%v concurrency=%v successful=%v failed=%v successRate=%.2f",
 			title, tapePosition, qps, concurrency, successful, failed, successRate)
 	}
 }
@@ -594,14 +594,10 @@ func (r *httpRequester) logProgress() {
 func (r *httpRequester) Idleness() <-chan struct{} { return r.idleness }
 
 type tapePositionTracker struct {
-	file *os.File
-	mMap mmap.MMap
-
-	tapePosition atomic.Int64
-	buffer       *tapePositionBuffer
+	file         *os.File
+	mMap         mmap.MMap
+	tapePosition *int64
 }
-
-type tapePositionBuffer [20]byte
 
 func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker, returnedErr error) {
 	file, err := os.OpenFile(tapePositionFileName, os.O_RDWR|os.O_CREATE, 0644)
@@ -614,32 +610,19 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 		}
 	}()
 
-	data, err := io.ReadAll(file)
+	fileInfo, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}
-	var tapePosition int64
-	if len(data) >= 1 {
-		tapePositionStr := string(data)
-		tapePosition, err = strconv.ParseInt(strings.TrimSpace(tapePositionStr), 10, 64)
-		if err != nil || tapePosition < 0 {
-			return nil, fmt.Errorf("invalid tape position %q", tapePositionStr)
-		}
-
-		_, err = file.Seek(0, 0)
+	switch n := fileInfo.Size(); n {
+	case 0:
+		err = file.Truncate(8)
 		if err != nil {
 			return nil, err
 		}
-		err = file.Truncate(0)
-		if err != nil {
-			return nil, err
-		}
-	}
-	var buffer tapePositionBuffer
-	dumpTapePosition(tapePosition, &buffer)
-	_, err = file.Write(buffer[:])
-	if err != nil {
-		return nil, err
+	case 8:
+	default:
+		return nil, fmt.Errorf("invalid tape position file %q with size %v", tapePositionFileName, n)
 	}
 
 	mMap, err := mmap.Map(file, mmap.RDWR, 0)
@@ -652,34 +635,28 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 		}
 	}()
 
-	t := &tapePositionTracker{
-		file:   file,
-		mMap:   mMap,
-		buffer: (*tapePositionBuffer)(mMap),
+	tapePosition := (*int64)(unsafe.Pointer(unsafe.SliceData(mMap)))
+	if *tapePosition < 0 {
+		return nil, fmt.Errorf("invalid tape position %v from file %q", *tapePosition, tapePositionFileName)
 	}
-	t.tapePosition.Store(tapePosition)
+
+	t := &tapePositionTracker{
+		file:         file,
+		mMap:         mMap,
+		tapePosition: tapePosition,
+	}
 	return t, nil
 }
 
 func (t *tapePositionTracker) Close() error {
-	t.buffer = nil
+	t.tapePosition = nil
 	err1 := t.mMap.Unmap()
 	err2 := t.file.Close()
 	return errors.Join(err1, err2)
 }
 
-func (t *tapePositionTracker) TapePosition() int64 { return t.tapePosition.Load() }
+func (t *tapePositionTracker) TapePosition() int64 { return atomic.LoadInt64(t.tapePosition) }
 
 func (t *tapePositionTracker) UpdateTapePosition(tapePosition int64) {
-	t.tapePosition.Store(tapePosition)
-	dumpTapePosition(tapePosition, t.buffer)
-}
-
-func dumpTapePosition(tapePosition int64, buffer *tapePositionBuffer) {
-	*buffer = [...]byte{'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '\n'}
-	i := len(buffer) - 2
-	for ; tapePosition >= 1; tapePosition /= 10 {
-		buffer[i] = '0' + byte(tapePosition%10)
-		i--
-	}
+	atomic.StoreInt64(t.tapePosition, tapePosition)
 }
