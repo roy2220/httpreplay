@@ -285,7 +285,26 @@ func (r *httpRequester) dispatchHttpRequests() {
 
 	r.logger.Println("===== Feel free to stop the program with CTRL+C; progress will be saved. =====")
 
-	for httpRequest, line := range r.readHttpRequests() {
+	for tapePosition, line := range r.readTape() {
+		curlCommand, err := parseCurlCommand(line)
+		if err != nil {
+			r.tapePositionTracker.UpdateTapePosition(tapePosition)
+			r.logger.Printf("[WARN] failed to parse curl command from line %q: %v", line, err)
+			continue
+		}
+		if curlCommand.URL == nil {
+			// ignore empty curl command
+			r.tapePositionTracker.UpdateTapePosition(tapePosition)
+			continue
+		}
+
+		httpRequest, err := r.buildHttpRequest(curlCommand)
+		if err != nil {
+			r.tapePositionTracker.UpdateTapePosition(tapePosition)
+			r.logger.Printf("[WARN] failed to build http request: %v", err)
+			continue
+		}
+
 		ok := acquireQpsToken()
 		if !ok {
 			// exit
@@ -298,13 +317,14 @@ func (r *httpRequester) dispatchHttpRequests() {
 			return
 		}
 
-		r.tapePositionTracker.IncTapePosition()
+		r.tapePositionTracker.UpdateTapePosition(tapePosition)
 		wg.Add(1)
 		go func() {
 			defer func() {
 				wg.Done()
 				releaseConcurrencyToken()
 			}()
+
 			r.doHttpRequest(httpRequest, line)
 		}()
 	}
@@ -312,52 +332,48 @@ func (r *httpRequester) dispatchHttpRequests() {
 	noMoreHttpRequests = true
 }
 
-func (r *httpRequester) readHttpRequests() iter.Seq2[*http.Request, string] {
-	numberOfHttpRequestsToSkip := int(r.tapePositionTracker.TapePosition())
+func (r *httpRequester) readTape() iter.Seq2[int64, string] {
+	lastTapePosition := r.tapePositionTracker.TapePosition()
 
-	return func(yield func(*http.Request, string) bool) {
+	return func(yield func(int64, string) bool) {
 		scanner := bufio.NewScanner(r.tapeFile)
 		scanner.Buffer(nil, tapeBufferSize)
 
-		for scanner.Scan() {
+		for tapePosition := int64(0); scanner.Scan(); tapePosition++ {
+			if tapePosition <= lastTapePosition {
+				continue
+			}
+
 			line := scanner.Text()
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
 
-			if numberOfHttpRequestsToSkip >= 1 {
-				numberOfHttpRequestsToSkip--
-				continue
-			}
-
-			httpRequest, err := r.parseHttpRequest(line)
-			if err != nil {
-				r.logger.Printf("[WARN] failed to parse http request from line %q: %v", line, err)
-				continue
-			}
-
-			if !yield(httpRequest, line) {
+			if !yield(tapePosition, line) {
 				return
 			}
 		}
 
 		if err := scanner.Err(); err != nil {
-			r.logger.Printf("[WARN] failed to read tape file: %v", err)
+			r.logger.Printf("[WARN] failed to scan tape file: %v", err)
 		}
 	}
 }
 
-func (r *httpRequester) parseHttpRequest(line string) (*http.Request, error) {
+type curlCommand struct {
+	URL     *string
+	Request string
+	Header  []string
+	Data    *string
+}
+
+func parseCurlCommand(line string) (curlCommand, error) {
 	args, err := shlex.Split(line)
 	if err != nil {
-		return nil, fmt.Errorf("split line: %w", err)
+		return curlCommand{}, fmt.Errorf("split line: %w", err)
 	}
-	var curlCommand struct {
-		URL     *string
-		Request string
-		Header  []string
-		Data    *string
+	if len(args) == 0 {
+		return curlCommand{}, nil
 	}
+
+	var curlCommand1 curlCommand
 	i := 0
 	n := len(args)
 	popNextArg := func() (string, bool) {
@@ -371,39 +387,68 @@ func (r *httpRequester) parseHttpRequest(line string) (*http.Request, error) {
 		arg := args[i]
 		if v, err, ok := getFlagValue(arg, "-X", "--request", popNextArg); ok {
 			if err != nil {
-				return nil, err
+				return curlCommand{}, err
 			}
-			curlCommand.Request = v
+			curlCommand1.Request = v
 			continue
 		}
 		if v, err, ok := getFlagValue(arg, "-H", "--header", popNextArg); ok {
 			if err != nil {
-				return nil, err
+				return curlCommand{}, err
 			}
-			curlCommand.Header = append(curlCommand.Header, v)
+			curlCommand1.Header = append(curlCommand1.Header, v)
 			continue
 		}
 		if v, err, ok := getFlagValue(arg, "-d", "--data", popNextArg); ok {
 			if err != nil {
-				return nil, err
+				return curlCommand{}, err
 			}
-			curlCommand.Data = &v
+			curlCommand1.Data = &v
 			continue
 		}
 		if strings.HasPrefix(arg, "-") {
-			return nil, fmt.Errorf("unsupported flag: %s", arg)
+			return curlCommand{}, fmt.Errorf("unsupported flag: %s", arg)
 		}
-		if curlCommand.URL == nil {
-			curlCommand.URL = &arg
+		if curlCommand1.URL == nil {
+			curlCommand1.URL = &arg
 		}
 	}
-	if curlCommand.URL == nil {
-		return nil, fmt.Errorf("missing url")
+	if curlCommand1.URL == nil {
+		return curlCommand{}, fmt.Errorf("missing url")
 	}
-	if curlCommand.Request == "" {
-		curlCommand.Request = "GET"
+	if curlCommand1.Request == "" {
+		curlCommand1.Request = "GET"
 	}
+	return curlCommand1, nil
+}
 
+func getFlagValue(arg, flagName, longFlagName string, popNextArg func() (string, bool)) (string, error, bool) {
+	longFlagMode := false
+	v := strings.TrimPrefix(arg, flagName)
+	if len(v) == len(arg) {
+		longFlagMode = true
+		v = strings.TrimPrefix(arg, longFlagName)
+	}
+	if len(v) == len(arg) {
+		return "", nil, false
+	}
+	if v == "" {
+		var ok bool
+		v, ok = popNextArg()
+		if !ok {
+			return "", fmt.Errorf("missing flag value for %s/%s", flagName, longFlagName), true
+		}
+	} else if v[0] == '=' {
+		v = v[1:]
+	} else {
+		if longFlagMode {
+			return "", nil, false
+		}
+	}
+	return v, nil, true
+}
+
+func (r *httpRequester) buildHttpRequest(curlCommand curlCommand) (*http.Request, error) {
 	var rawBody *string
 	var body io.Reader
 	if curlCommand.Data != nil {
@@ -437,32 +482,6 @@ func (r *httpRequester) parseHttpRequest(line string) (*http.Request, error) {
 		}
 	}
 	return httpRequest, nil
-}
-
-func getFlagValue(arg, flagName, longFlagName string, popNextArg func() (string, bool)) (string, error, bool) {
-	longFlagMode := false
-	v := strings.TrimPrefix(arg, flagName)
-	if len(v) == len(arg) {
-		longFlagMode = true
-		v = strings.TrimPrefix(arg, longFlagName)
-	}
-	if len(v) == len(arg) {
-		return "", nil, false
-	}
-	if v == "" {
-		var ok bool
-		v, ok = popNextArg()
-		if !ok {
-			return "", fmt.Errorf("missing flag value for %s/%s", flagName, longFlagName), true
-		}
-	} else if v[0] == '=' {
-		v = v[1:]
-	} else {
-		if longFlagMode {
-			return "", nil, false
-		}
-	}
-	return v, nil, true
 }
 
 func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
@@ -579,8 +598,10 @@ type tapePositionTracker struct {
 	mMap mmap.MMap
 
 	tapePosition atomic.Int64
-	buffer       *[20]byte
+	buffer       *tapePositionBuffer
 }
+
+type tapePositionBuffer [20]byte
 
 func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker, returnedErr error) {
 	file, err := os.OpenFile(tapePositionFileName, os.O_RDWR|os.O_CREATE, 0644)
@@ -614,7 +635,7 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 			return nil, err
 		}
 	}
-	var buffer [20]byte
+	var buffer tapePositionBuffer
 	dumpTapePosition(tapePosition, &buffer)
 	_, err = file.Write(buffer[:])
 	if err != nil {
@@ -634,7 +655,7 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 	t := &tapePositionTracker{
 		file:   file,
 		mMap:   mMap,
-		buffer: (*[20]byte)(mMap),
+		buffer: (*tapePositionBuffer)(mMap),
 	}
 	t.tapePosition.Store(tapePosition)
 	return t, nil
@@ -649,14 +670,14 @@ func (t *tapePositionTracker) Close() error {
 
 func (t *tapePositionTracker) TapePosition() int64 { return t.tapePosition.Load() }
 
-func (t *tapePositionTracker) IncTapePosition() {
-	tapePosition := t.tapePosition.Add(1)
+func (t *tapePositionTracker) UpdateTapePosition(tapePosition int64) {
+	t.tapePosition.Store(tapePosition)
 	dumpTapePosition(tapePosition, t.buffer)
 }
 
-func dumpTapePosition(tapePosition int64, buffer *[20]byte) {
-	*buffer = [...]byte{'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0'}
-	i := len(buffer) - 1
+func dumpTapePosition(tapePosition int64, buffer *tapePositionBuffer) {
+	*buffer = [...]byte{'0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '\n'}
+	i := len(buffer) - 2
 	for ; tapePosition >= 1; tapePosition /= 10 {
 		buffer[i] = '0' + byte(tapePosition%10)
 		i--

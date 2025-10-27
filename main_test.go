@@ -66,8 +66,8 @@ func TestNormal(t *testing.T) {
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
 %[1]s/api?v=1
-%[1]s/api?v=2 -H'X-Foo: Bar'
-%[1]s/api?v=3 -X=GET -H 'X-Foo: Bar'
+-H'X-Foo: Bar' %[1]s/api?v=2
+%[1]s/api?v=3 -X=GET -H 'X-Foo: Bar'  # my comment
 %[1]s/api?v=4 -H'X-Foo: Bar' --request POST --data='{"key": "value"}' --header 'X-Hello: World'
 `, server.URL), 0644)
 	require.NoError(t, err)
@@ -288,7 +288,8 @@ func TestProgressResumption(t *testing.T) {
 	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
 %[1]s/api?v=1
 %[1]s/api?v=2 -H 'X-Foo: Bar'
-%[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
+%[1]s/api?v=3 -X GET -H 'X-Foo: Bar' # my comment
+   # %[1]s/api?v=333 -X GET -H 'X-Foo: Bar'
 %[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'X-Hello: World'
 `, server.URL), 0644)
 	require.NoError(t, err)
