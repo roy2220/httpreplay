@@ -68,22 +68,34 @@ https://example.com/api/auth -X GET -H "Authorization: Bearer token"
 
 ## Quick Start & Examples
 
-1.  **Replay with limits (QPS=10, Concurrency=5):**
+1. **Standard replay:** Sets a **QPS limit of 10** and a **concurrency limit of 5**.
 
-    ```bash
+    ```
     httpreplay requests.txt -q 10 -c 5
     ```
 
-2.  **Dry-run with a 30-second timeout:**
+2. **Maximum QPS:** Limits only **concurrency to 100** for maximum possible throughput (limited only by the target server and network).
 
-    ```bash
-    httpreplay requests.txt -t 30 -d
+    ```
+    httpreplay requests.txt -q 0 -c 100
     ```
 
-3.  **Replay without QPS or concurrency limits (maximum throughput):**
+3. **Limit by QPS only:** Limits only **QPS to 50**, allowing unlimited concurrent requests.
 
-    ```bash
-    httpreplay requests.txt -q 0 -c 0
+    ```
+    httpreplay requests.txt -q 50 -c 0
+    ```
+
+4. **Dry-run:** Previews requests to the console without actually sending them.
+
+    ```
+    httpreplay requests.txt -d
+    ```
+
+5. **Follow redirects:** Replays requests, following any HTTP redirects (e.g., `301` or `302`).
+
+    ```
+    httpreplay requests.txt -f
     ```
 
 > **Tip**: You can stop the process safely with **`Ctrl+C`**. It will save its progress and can resume when run again.
