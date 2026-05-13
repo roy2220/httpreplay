@@ -36,7 +36,7 @@ httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d]
 | Argument | Description | Default |
 | :--- | :--- | :--- |
 | **TAPE-FILE** (required) | Path to the tape file containing HTTP requests. | |
-| **-n NUM** | Stop after `NUM` HTTP requests. Set to `< 0` for no stop. | `-1` |
+| **-n NUM** | Early stop after `NUM` HTTP requests. Set to `< 0` for no early stop. | `-1` |
 | **-q QPS** | Queries per second limit. Set to `< 1` for no limit. | `1` |
 | **-c CONCURRENCY** | Concurrent requests limit. Set to `< 1` for no limit. | `1` |
 | **-t TIMEOUT** | HTTP request timeout in seconds. Set to `< 1` for no timeout. | `10` |

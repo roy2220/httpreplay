@@ -44,7 +44,7 @@ func Main(
 ) {
 	var args struct {
 		TapeFileName            string `arg:"required,positional" placeholder:"TAPE-FILE" help:"the tape file containing HTTP requests"`
-		MaxNumberOfHttpRequests int    `arg:"-n,--" placeholder:"NUM" help:"stop after a specified number of http requests, no stop if less than 0" default:"-1"`
+		MaxNumberOfHttpRequests int    `arg:"-n,--" placeholder:"NUM" help:"early stop after a specified number of http requests, no early stop if less than 0" default:"-1"`
 		QpsLimit                int    `arg:"-q,--" placeholder:"QPS" help:"the limit of qps, no limit if less than 1" default:"1"`
 		ConcurrencyLimit        int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"the limit of concurrency, no limit if less than 1" default:"1"`
 		Timeout                 int    `arg:"-t,--" placeholder:"TIMEOUT" help:"the timeout of HTTP request in seconds, no timeout if less than 1" default:"10"`
