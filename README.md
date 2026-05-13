@@ -28,7 +28,7 @@
 Run `httpreplay` with the required tape file and optional flags:
 
 ```bash
-httpreplay TAPE-FILE [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d]
+httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d]
 ````
 
 ### Arguments
@@ -36,6 +36,7 @@ httpreplay TAPE-FILE [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d]
 | Argument | Description | Default |
 | :--- | :--- | :--- |
 | **TAPE-FILE** (required) | Path to the tape file containing HTTP requests. | |
+| **-n NUM** | Stop after `NUM` HTTP requests. Set to `< 0` for no stop. | `-1` |
 | **-q QPS** | Queries per second limit. Set to `< 1` for no limit. | `1` |
 | **-c CONCURRENCY** | Concurrent requests limit. Set to `< 1` for no limit. | `1` |
 | **-t TIMEOUT** | HTTP request timeout in seconds. Set to `< 1` for no timeout. | `10` |
@@ -86,13 +87,19 @@ https://example.com/api/auth -X GET -H "Authorization: Bearer token"
     httpreplay requests.txt -q 50 -c 0
     ```
 
-4. **Dry-run:** Previews requests to the console without actually sending them.
+4. **Replay only the next 100 requests:** Useful for batch processing a large tape incrementally.
+
+    ```
+    httpreplay requests.txt -n 100 -q 10 -c 5
+    ```
+
+5. **Dry-run:** Previews requests to the console without actually sending them.
 
     ```
     httpreplay requests.txt -d
     ```
 
-5. **Follow redirects:** Replays requests, following any HTTP redirects (e.g., `301` or `302`).
+6. **Follow redirects:** Replays requests, following any HTTP redirects (e.g., `301` or `302`).
 
     ```
     httpreplay requests.txt -f
