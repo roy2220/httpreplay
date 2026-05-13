@@ -60,7 +60,7 @@ The tape file contains **one HTTP request per line**, in a format similar to `cu
 ### Example Tape File (`requests.txt`)
 
 ```
-https://example.com/api/status
+https://example.com/api/status  # Shell-style comments are allowed
 https://example.com/api/post -X POST -H "Content-Type: application/json" -d '{"key":"value"}'
 https://example.com/api/auth -X GET -H "Authorization: Bearer token"
 ```
