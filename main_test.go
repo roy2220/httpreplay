@@ -421,8 +421,8 @@ func TestFailureTape(t *testing.T) {
 	data, err := os.ReadFile(tapeFilePath + ".httpreplay-failure")
 	require.NoError(t, err)
 	require.Equal(t, fmt.Sprintf(`
-%[1]s/api?v=1
-%[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
+%[1]s/api?v=1  # STATUS CODE: 500
+%[1]s/api?v=3 -X GET -H 'X-Foo: Bar'  # ERROR: Get "%[1]s/api?v=3": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
 `, server.URL)[1:], string(data))
 }
 

@@ -547,7 +547,7 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 			r.logger.Printf("[DEBUG] %v %q responded exception status code: %v", httpRequest.Method, httpRequest.URL.String(), resp.StatusCode)
 		}
 		r.stats.failed.Add(1)
-		line = fmt.Sprintf(line, "%v  # STATUS CODE: %v", line, resp.StatusCode)
+		line = fmt.Sprintf("%v  # STATUS CODE: %v", line, resp.StatusCode)
 		r.recordFailedHttpRequest(line)
 		return
 	}
