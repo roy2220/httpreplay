@@ -2,7 +2,6 @@ package main_test
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	. "github.com/roy2220/httpreplay"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -93,30 +91,31 @@ func TestNormal(t *testing.T) {
 
 	server.Close()
 	require.Len(t, requests, 4)
-	assert.Contains(t, requests, request{
+	require.Contains(t, requests, request{
 		Method: "GET",
 		URI:    "/api?v=1",
 		Header: nil,
 		Body:   "",
 	})
-	assert.Contains(t, requests, request{
+	require.Contains(t, requests, request{
 		Method: "GET",
 		URI:    "/api?v=2",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
 	})
-	assert.Contains(t, requests, request{
+	require.Contains(t, requests, request{
 		Method: "GET",
 		URI:    "/api?v=3",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
 	})
-	assert.Contains(t, requests, request{
+	require.Contains(t, requests, request{
 		Method: "POST",
 		URI:    "/api?v=4",
 		Header: http.Header{"X-Foo": []string{"Bar"}, "X-Hello": []string{"World"}},
 		Body:   `{"key": "value"}`,
 	})
+	require.NoFileExists(t, tapeFilePath+".httpreplay-failure")
 }
 
 func TestFollowRedirects(t *testing.T) {
@@ -182,12 +181,13 @@ func TestFollowRedirects(t *testing.T) {
 
 	server.Close()
 	require.Len(t, requests, 5)
-	assert.Contains(t, requests, request{
+	require.Contains(t, requests, request{
 		Method: "GET",
 		URI:    "/redirect",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
 	})
+	require.NoFileExists(t, tapeFilePath+".httpreplay-failure")
 }
 
 func TestDryRun(t *testing.T) {
@@ -246,15 +246,11 @@ func TestDryRun(t *testing.T) {
 	require.Regexp(t, "final progress:.* successful=4", out.String())
 	require.Regexp(t, "final progress:.* failed=0", out.String())
 
-	fileExists := func(filePath string) bool {
-		_, err := os.Stat(filePath)
-		return !errors.Is(err, os.ErrNotExist)
-	}
-
 	server.Close()
 	require.Len(t, requests, 0)
-	require.False(t, fileExists(tapeFilePath+".httpreplay-pos"))
-	require.True(t, fileExists(tapeFilePath+".httpreplay-pos.dry-run"))
+	require.NoFileExists(t, tapeFilePath+".httpreplay-pos")
+	require.FileExists(t, tapeFilePath+".httpreplay-pos.dry-run")
+	require.NoFileExists(t, tapeFilePath+".httpreplay-failure")
 }
 
 func TestProgressResumption(t *testing.T) {
@@ -328,25 +324,25 @@ func TestProgressResumption(t *testing.T) {
 
 	server.Close()
 	require.Len(t, requests, 4)
-	assert.Contains(t, requests, request{
+	require.Contains(t, requests, request{
 		Method: "GET",
 		URI:    "/api?v=1",
 		Header: nil,
 		Body:   "",
 	})
-	assert.Contains(t, requests, request{
+	require.Contains(t, requests, request{
 		Method: "GET",
 		URI:    "/api?v=2",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
 	})
-	assert.Contains(t, requests, request{
+	require.Contains(t, requests, request{
 		Method: "GET",
 		URI:    "/api?v=3",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
 	})
-	assert.Contains(t, requests, request{
+	require.Contains(t, requests, request{
 		Method: "POST",
 		URI:    "/api?v=4",
 		Header: http.Header{"X-Hello": []string{"World"}},
@@ -428,6 +424,59 @@ func TestFailureTape(t *testing.T) {
 %[1]s/api?v=1
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
 `, server.URL)[1:], string(data))
+}
+
+func TestMaxNumberOfHttpRequests(t *testing.T) {
+	var requestsLock sync.Mutex
+	var requests []request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requestsLock.Lock()
+		requests = append(requests, request{
+			Method: r.Method,
+			URI:    r.RequestURI,
+			Body:   string(body),
+		})
+		requestsLock.Unlock()
+	}))
+	t.Cleanup(server.Close)
+
+	tempDirPath := t.TempDir()
+	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
+	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
+%[1]s/api?v=1
+%[1]s/api?v=2
+%[1]s/api?v=3
+%[1]s/api?v=4
+`, server.URL)[1:], 0644)
+	require.NoError(t, err)
+
+	out := bytes.NewBuffer(nil)
+	defer func() { t.Log(out.String()) }()
+
+	Main(
+		[]string{
+			"-n", "2",
+			"-c", "1",
+			"-q", "0",
+			tapeFilePath,
+		},
+		out,
+		mockExit,
+		nil,
+		true,
+	)
+
+	require.Contains(t, out.String(), "reached max number of http requests")
+	require.Regexp(t, "final progress:.* tapePosition=2", out.String())
+	require.Regexp(t, "final progress:.* successful=2", out.String())
+	require.Regexp(t, "final progress:.* failed=0", out.String())
+
+	server.Close()
+	require.Len(t, requests, 2)
+	require.Contains(t, requests, request{Method: "GET", URI: "/api?v=1", Body: ""})
+	require.Contains(t, requests, request{Method: "GET", URI: "/api?v=2", Body: ""})
+	require.NoFileExists(t, tapeFilePath+".httpreplay-failure")
 }
 
 func TestBadArgs(t *testing.T) {

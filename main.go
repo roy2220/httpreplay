@@ -43,12 +43,13 @@ func Main(
 	debug bool,
 ) {
 	var args struct {
-		TapeFileName     string `arg:"required,positional" placeholder:"TAPE-FILE" help:"the tape file containing HTTP requests"`
-		QpsLimit         int    `arg:"-q,--" placeholder:"QPS" help:"the limt of qps, no limit if less than 1" default:"1"`
-		ConcurrencyLimit int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"the limt of concurrency, no limit if less than 1" default:"1"`
-		Timeout          int    `arg:"-t,--" placeholder:"TIMEOUT" help:"the timeout of HTTP request in seconds, no timeout if less than 1" default:"10"`
-		FollowRedirects  bool   `arg:"-f,--" help:"follow HTTP redirects" default:"false"`
-		DryRun           bool   `arg:"-d,--" help:"dry-run mode" default:"false"`
+		TapeFileName            string `arg:"required,positional" placeholder:"TAPE-FILE" help:"the tape file containing HTTP requests"`
+		MaxNumberOfHttpRequests int    `arg:"-n,--" placeholder:"NUM" help:"stop after a specified number of http requests, no stop if less than 0" default:"-1"`
+		QpsLimit                int    `arg:"-q,--" placeholder:"QPS" help:"the limit of qps, no limit if less than 1" default:"1"`
+		ConcurrencyLimit        int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"the limit of concurrency, no limit if less than 1" default:"1"`
+		Timeout                 int    `arg:"-t,--" placeholder:"TIMEOUT" help:"the timeout of HTTP request in seconds, no timeout if less than 1" default:"10"`
+		FollowRedirects         bool   `arg:"-f,--" help:"follow HTTP redirects" default:"false"`
+		DryRun                  bool   `arg:"-d,--" help:"dry-run mode" default:"false"`
 	}
 	{
 		parser, err := arg.NewParser(arg.Config{Exit: exit, Out: out}, &args)
@@ -66,6 +67,7 @@ func Main(
 
 	httpRequester, err := newHttpRequester(
 		args.TapeFileName,
+		args.MaxNumberOfHttpRequests,
 		args.QpsLimit,
 		args.ConcurrencyLimit,
 		time.Duration(args.Timeout)*time.Second,
@@ -95,17 +97,18 @@ const (
 )
 
 type httpRequester struct {
-	tapeFile            *os.File
-	tapePositionTracker *tapePositionTracker
-	failureTapeFile     *os.File
-	failureTapeLock     sync.Mutex
-	failureTape         *bufio.Writer
-	qpsLimit            int
-	concurrencyLimit    int
-	httpClient          *http.Client
-	dryRun              bool
-	debug               bool
-	logger              *log.Logger
+	tapeFile                *os.File
+	tapePositionTracker     *tapePositionTracker
+	failureTapeFile         *os.File
+	failureTapeLock         sync.Mutex
+	failureTape             *bufio.Writer
+	maxNumberOfHttpRequests int
+	qpsLimit                int
+	concurrencyLimit        int
+	httpClient              *http.Client
+	dryRun                  bool
+	debug                   bool
+	logger                  *log.Logger
 
 	backgroundCtx context.Context
 	cancel        context.CancelFunc
@@ -122,6 +125,7 @@ type httpRequester struct {
 
 func newHttpRequester(
 	tapeFileName string,
+	maxNumberOfHttpRequests int,
 	qpsLimit, concurrencyLimit int,
 	timeout time.Duration,
 	followRedirects bool,
@@ -158,7 +162,14 @@ func newHttpRequester(
 	}
 	defer func() {
 		if returnedErr != nil {
+			var failureTapeFileIsEmpty bool
+			if fi, err := failureTapeFile.Stat(); err == nil && fi.Size() == 0 {
+				failureTapeFileIsEmpty = true
+			}
 			failureTapeFile.Close()
+			if failureTapeFileIsEmpty {
+				os.Remove(failureTapeFile.Name())
+			}
 		}
 	}()
 	if timeout < 0 {
@@ -184,17 +195,18 @@ func newHttpRequester(
 		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
 	r := &httpRequester{
-		tapeFile:            tapeFile,
-		tapePositionTracker: tapePositionTracker,
-		failureTapeFile:     failureTapeFile,
-		failureTape:         bufio.NewWriterSize(failureTapeFile, tapeBufferSize),
-		qpsLimit:            qpsLimit,
-		concurrencyLimit:    concurrencyLimit,
-		httpClient:          &httpClient,
-		dryRun:              dryRun,
-		debug:               debug,
-		logger:              logger,
-		idleness:            make(chan struct{}),
+		tapeFile:                tapeFile,
+		tapePositionTracker:     tapePositionTracker,
+		failureTapeFile:         failureTapeFile,
+		failureTape:             bufio.NewWriterSize(failureTapeFile, tapeBufferSize),
+		maxNumberOfHttpRequests: maxNumberOfHttpRequests,
+		qpsLimit:                qpsLimit,
+		concurrencyLimit:        concurrencyLimit,
+		httpClient:              &httpClient,
+		dryRun:                  dryRun,
+		debug:                   debug,
+		logger:                  logger,
+		idleness:                make(chan struct{}),
 	}
 	r.start()
 	return r, nil
@@ -235,9 +247,19 @@ func (r *httpRequester) Close() {
 		r.logger.Printf("[WARN] failed to close tape position file: %v", err)
 	}
 
+	var failureTapeFileIsEmpty bool
+	if fi, err := r.failureTapeFile.Stat(); err == nil && fi.Size() == 0 {
+		failureTapeFileIsEmpty = true
+	}
 	err = r.failureTapeFile.Close()
 	if err != nil {
 		r.logger.Printf("[WARN] failed to close failure tape file: %v", err)
+	}
+	if failureTapeFileIsEmpty {
+		err = os.Remove(r.failureTapeFile.Name())
+		if err != nil {
+			r.logger.Printf("[WARN] failed to remove empty failure tape file: %v", err)
+		}
 	}
 }
 
@@ -285,6 +307,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 
 	r.logger.Println("===== Feel free to stop the program with CTRL+C; progress will be saved. =====")
 
+	var numberOfHttpRequests int
 	for tapePosition, line := range r.readTape() {
 		curlCommand, err := parseCurlCommand(line)
 		if err != nil {
@@ -303,6 +326,12 @@ func (r *httpRequester) dispatchHttpRequests() {
 			r.tapePositionTracker.UpdateTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to build http request: %v", err)
 			continue
+		}
+
+		numberOfHttpRequests++
+		if r.maxNumberOfHttpRequests >= 0 && numberOfHttpRequests > r.maxNumberOfHttpRequests {
+			r.logger.Println("[INFO] reached max number of http requests")
+			return
 		}
 
 		ok := acquireQpsToken()
@@ -507,6 +536,7 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 			r.logger.Printf("[DEBUG] failed to do http request: %v", err)
 		}
 		r.stats.failed.Add(1)
+		line = fmt.Sprintf("%v  # ERROR: %v", line, strings.ReplaceAll(err.Error(), "\n", ""))
 		r.recordFailedHttpRequest(line)
 		return
 	}
@@ -517,6 +547,7 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 			r.logger.Printf("[DEBUG] %v %q responded exception status code: %v", httpRequest.Method, httpRequest.URL.String(), resp.StatusCode)
 		}
 		r.stats.failed.Add(1)
+		line = fmt.Sprintf(line, "%v  # STATUS CODE: %v", line, resp.StatusCode)
 		r.recordFailedHttpRequest(line)
 		return
 	}
