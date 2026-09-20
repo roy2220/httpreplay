@@ -4,6 +4,9 @@
 
 `httpreplay` is a **high-performance, resumable** command-line interface (CLI) tool for replaying HTTP requests from a tape file. It efficiently simulates traffic while enforcing configurable **QPS** (queries per second) and **concurrency** limits.
 
+> [!NOTE]
+> Except for the documentation, every line of code is human-crafted. **No AI slop included**.
+
 ## Features
 
 - **Resumable Operations**: Automatically tracks and saves the last processed request position using an **atomic position file (mmap-based)**, allowing for safe, interruption-tolerant restarts (e.g., after `Ctrl+C` or system failure).
