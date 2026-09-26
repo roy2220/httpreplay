@@ -2,7 +2,7 @@
 
 [![Coverage](./.badges/coverage.svg)](#)
 
-`httpreplay` is a **high-performance, resumable** command-line interface (CLI) tool for replaying HTTP requests from a tape file. It efficiently simulates traffic while enforcing configurable **QPS** (queries per second) and **concurrency** limits.
+`httpreplay` is a **efficient, resumable** command-line interface (CLI) tool for replaying HTTP requests from a tape file. It efficiently simulates traffic while enforcing configurable **QPS** (queries per second) and **concurrency** limits.
 
 > [!NOTE]
 > Except for the documentation, every line of code is human-crafted. **No AI slop included**.
@@ -22,7 +22,17 @@
 
 ## Installation
 
-[**Download the latest binary**](https://github.com/roy2220/httpreplay/releases)
+### Option 1: Download Pre-Built Binary
+
+Visit the [Releases](https://github.com/roy2220/httpreplay/releases) page.
+
+### Option 2: Build from Source
+
+Requires Go toolchain 1.24+.
+
+```bash
+GOBIN=${PWD} CGO_ENABLED=0 go install github.com/roy2220/httpreplay@latest
+```
 
 ---
 
