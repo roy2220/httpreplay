@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -309,19 +310,19 @@ func (r *httpRequester) dispatchHttpRequests() {
 
 	var numberOfHttpRequests int
 	for tapePosition, line := range r.readTape() {
-		curlCommand, err := parseCurlCommand(line)
+		curlCommand1, err := parseCurlCommand(line)
 		if err != nil {
 			r.tapePositionTracker.UpdateTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to parse curl command from line %q: %v", line, err)
 			continue
 		}
-		if curlCommand.URL == nil {
+		if curlCommand1 == (curlCommand{}) {
 			// ignore empty curl command
 			r.tapePositionTracker.UpdateTapePosition(tapePosition)
 			continue
 		}
 
-		httpRequest, err := r.buildHttpRequest(curlCommand)
+		httpRequest, err := r.buildHttpRequest(curlCommand1)
 		if err != nil {
 			r.tapePositionTracker.UpdateTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to build http request: %v", err)
@@ -387,10 +388,10 @@ func (r *httpRequester) readTape() iter.Seq2[int64, string] {
 }
 
 type curlCommand struct {
-	URL     *string
+	URL     string
 	Request string
-	Header  []string
-	Data    *string
+	Header  *bytes.Buffer
+	Data    *bytes.Buffer
 }
 
 func parseCurlCommand(line string) (curlCommand, error) {
@@ -412,6 +413,10 @@ func parseCurlCommand(line string) (curlCommand, error) {
 		}
 		return "", false
 	}
+	var (
+		contentTypeHeaderIsSet bool
+		urlIsProvided          bool
+	)
 	for ; i < n; i++ {
 		arg := args[i]
 		if v, err, ok := getFlagValue(arg, "-X", "--request", popNextArg); ok {
@@ -425,28 +430,71 @@ func parseCurlCommand(line string) (curlCommand, error) {
 			if err != nil {
 				return curlCommand{}, err
 			}
-			curlCommand1.Header = append(curlCommand1.Header, v)
+			key, _, ok := strings.Cut(v, ":")
+			if !ok {
+				return curlCommand{}, fmt.Errorf("invalid header: %v", v)
+			}
+			if strings.ToLower(key) == "content-type" {
+				contentTypeHeaderIsSet = true
+			}
+			header := curlCommand1.Header
+			if header == nil {
+				header = new(bytes.Buffer)
+				curlCommand1.Header = header
+			} else {
+				header.WriteString("\r\n")
+			}
+			header.WriteString(v)
 			continue
 		}
 		if v, err, ok := getFlagValue(arg, "-d", "--data", popNextArg); ok {
 			if err != nil {
 				return curlCommand{}, err
 			}
-			curlCommand1.Data = &v
+			data := curlCommand1.Data
+			if data == nil {
+				data = new(bytes.Buffer)
+				curlCommand1.Data = data
+			} else {
+				data.WriteByte('&')
+			}
+			data.WriteString(v)
 			continue
 		}
 		if strings.HasPrefix(arg, "-") {
 			return curlCommand{}, fmt.Errorf("unsupported flag: %v", arg)
 		}
-		if curlCommand1.URL == nil {
-			curlCommand1.URL = &arg
+		if !urlIsProvided {
+			curlCommand1.URL = arg
+			urlIsProvided = true
 		}
 	}
-	if curlCommand1.URL == nil {
+	if !urlIsProvided {
 		return curlCommand{}, fmt.Errorf("missing url")
 	}
+	if curlCommand1.URL == "" {
+		return curlCommand{}, fmt.Errorf("empty url")
+	}
+	if curlCommand1.Data != nil {
+		if curlCommand1.Request == "" {
+			curlCommand1.Request = http.MethodPost
+		}
+		if !contentTypeHeaderIsSet {
+			header := curlCommand1.Header
+			if header == nil {
+				header = new(bytes.Buffer)
+				curlCommand1.Header = header
+			} else {
+				header.WriteString("\r\n")
+			}
+			header.WriteString("Content-Type: application/x-www-form-urlencoded")
+		}
+	}
 	if curlCommand1.Request == "" {
-		curlCommand1.Request = "GET"
+		curlCommand1.Request = http.MethodGet
+	}
+	if curlCommand1.Header != nil {
+		curlCommand1.Header.WriteString("\r\n\r\n")
 	}
 	return curlCommand1, nil
 }
@@ -478,36 +526,31 @@ func getFlagValue(arg, flagName, longFlagName string, popNextArg func() (string,
 }
 
 func (r *httpRequester) buildHttpRequest(curlCommand curlCommand) (*http.Request, error) {
-	var rawBody *string
+	rawBody := curlCommand.Data
 	var body io.Reader
-	if curlCommand.Data != nil {
-		rawBody = curlCommand.Data
-		body = strings.NewReader(*rawBody)
+	if rawBody != nil {
+		body = rawBody
 	}
-	httpRequest, err := http.NewRequest(curlCommand.Request, *curlCommand.URL, body)
+	httpRequest, err := http.NewRequest(curlCommand.Request, curlCommand.URL, body)
 	if err != nil {
 		return nil, fmt.Errorf("new http request: %w", err)
 	}
-	if len(curlCommand.Header) >= 1 {
-		reader := textproto.NewReader(
-			bufio.NewReader(
-				strings.NewReader(
-					strings.Join(curlCommand.Header, "\r\n") +
-						"\r\n\r\n",
-				),
-			),
-		)
+	if curlCommand.Header != nil {
+		reader := textproto.NewReader(bufio.NewReader(curlCommand.Header))
 		header, err := reader.ReadMIMEHeader()
 		if err != nil {
 			return nil, fmt.Errorf("read MIME header: %w", err)
 		}
 		httpRequest.Header = http.Header(header)
 	}
+	if host := httpRequest.Header.Get("Host"); host != "" {
+		httpRequest.Host = host
+	}
 	if r.debug {
 		if rawBody == nil {
 			r.logger.Printf("[DEBUG] http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
 		} else {
-			r.logger.Printf("[DEBUG] http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, *rawBody)
+			r.logger.Printf("[DEBUG] http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, rawBody.Bytes())
 		}
 	}
 	return httpRequest, nil

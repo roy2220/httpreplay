@@ -24,6 +24,7 @@ func mockExit(n int) {
 
 type request struct {
 	Method string
+	Host   string
 	URI    string
 	Header http.Header
 	Body   string
@@ -37,13 +38,14 @@ func TestNormal(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		request := request{
 			Method: r.Method,
+			Host:   r.Host,
 			URI:    r.RequestURI,
 			Header: nil,
 			Body:   string(body),
 		}
 		h := http.Header{}
 		for k, vs := range r.Header {
-			if strings.HasPrefix(k, "X-") {
+			if k == "Content-Type" || strings.HasPrefix(k, "X-") {
 				h[k] = vs
 			}
 		}
@@ -66,7 +68,9 @@ func TestNormal(t *testing.T) {
 %[1]s/api?v=1
 -H'X-Foo: Bar' %[1]s/api?v=2
 %[1]s/api?v=3 -X=GET -H 'X-Foo: Bar'  # my comment
-%[1]s/api?v=4 -H'X-Foo: Bar' --request POST --data='{"key": "value"}' --header 'X-Hello: World'
+%[1]s/api?v=4 -H'X-Foo: Bar' --request POST --data='{"key": "value"}' --header 'X-Hello: World' --header='Content-Type: application/json'
+%[1]s/api?v=5 -d 'foo=bar'
+%[1]s/api?v=6 -d 'foo=bar' -d 'key=val' -H 'Host: example.com'
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
@@ -85,35 +89,58 @@ func TestNormal(t *testing.T) {
 		true,
 	)
 
-	require.Regexp(t, "final progress:.* tapePosition=4", out.String())
-	require.Regexp(t, "final progress:.* successful=4", out.String())
+	require.Regexp(t, "final progress:.* tapePosition=6", out.String())
+	require.Regexp(t, "final progress:.* successful=6", out.String())
 	require.Regexp(t, "final progress:.* failed=0", out.String())
 
 	server.Close()
-	require.Len(t, requests, 4)
+	require.Len(t, requests, 6)
+	host := server.Listener.Addr().String()
 	require.Contains(t, requests, request{
 		Method: "GET",
+		Host:   host,
 		URI:    "/api?v=1",
 		Header: nil,
 		Body:   "",
 	})
 	require.Contains(t, requests, request{
 		Method: "GET",
+		Host:   host,
 		URI:    "/api?v=2",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
 	})
 	require.Contains(t, requests, request{
 		Method: "GET",
+		Host:   host,
 		URI:    "/api?v=3",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
 	})
 	require.Contains(t, requests, request{
 		Method: "POST",
+		Host:   host,
 		URI:    "/api?v=4",
-		Header: http.Header{"X-Foo": []string{"Bar"}, "X-Hello": []string{"World"}},
-		Body:   `{"key": "value"}`,
+		Header: http.Header{
+			"X-Foo":        []string{"Bar"},
+			"X-Hello":      []string{"World"},
+			"Content-Type": []string{"application/json"},
+		},
+		Body: `{"key": "value"}`,
+	})
+	require.Contains(t, requests, request{
+		Method: "POST",
+		Host:   host,
+		URI:    "/api?v=5",
+		Header: http.Header{"Content-Type": []string{"application/x-www-form-urlencoded"}},
+		Body:   "foo=bar",
+	})
+	require.Contains(t, requests, request{
+		Method: "POST",
+		Host:   "example.com",
+		URI:    "/api?v=6",
+		Header: http.Header{"Content-Type": []string{"application/x-www-form-urlencoded"}},
+		Body:   "foo=bar&key=val",
 	})
 	require.NoFileExists(t, tapeFilePath+".httpreplay-failure")
 }
@@ -126,13 +153,14 @@ func TestFollowRedirects(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		request := request{
 			Method: r.Method,
+			Host:   r.Host,
 			URI:    r.RequestURI,
 			Header: nil,
 			Body:   string(body),
 		}
 		h := http.Header{}
 		for k, vs := range r.Header {
-			if strings.HasPrefix(k, "X-") {
+			if k == "Content-Type" || strings.HasPrefix(k, "X-") {
 				h[k] = vs
 			}
 		}
@@ -155,7 +183,7 @@ func TestFollowRedirects(t *testing.T) {
 %[1]s/api?v=1
 %[1]s/api?v=2 -H 'X-Foo: Bar'
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'X-Hello: World'
+%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
@@ -181,8 +209,10 @@ func TestFollowRedirects(t *testing.T) {
 
 	server.Close()
 	require.Len(t, requests, 5)
+	host := server.Listener.Addr().String()
 	require.Contains(t, requests, request{
 		Method: "GET",
+		Host:   host,
 		URI:    "/redirect",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
@@ -197,13 +227,14 @@ func TestDryRun(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		request := request{
 			Method: r.Method,
+			Host:   r.Host,
 			URI:    r.RequestURI,
 			Header: nil,
 			Body:   string(body),
 		}
 		h := http.Header{}
 		for k, vs := range r.Header {
-			if strings.HasPrefix(k, "X-") {
+			if k == "Content-Type" || strings.HasPrefix(k, "X-") {
 				h[k] = vs
 			}
 		}
@@ -222,7 +253,7 @@ func TestDryRun(t *testing.T) {
 %[1]s/api?v=1
 %[1]s/api?v=2 -H 'X-Foo: Bar'
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'X-Hello: World'
+%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
@@ -260,13 +291,14 @@ func TestProgressResumption(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		request := request{
 			Method: r.Method,
+			Host:   r.Host,
 			URI:    r.RequestURI,
 			Header: nil,
 			Body:   string(body),
 		}
 		h := http.Header{}
 		for k, vs := range r.Header {
-			if strings.HasPrefix(k, "X-") {
+			if k == "Content-Type" || strings.HasPrefix(k, "X-") {
 				h[k] = vs
 			}
 		}
@@ -288,7 +320,7 @@ func TestProgressResumption(t *testing.T) {
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar' # my comment
 
    # %[1]s/api?v=333 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'X-Hello: World'
+   %[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
@@ -324,28 +356,33 @@ func TestProgressResumption(t *testing.T) {
 
 	server.Close()
 	require.Len(t, requests, 4)
+	host := server.Listener.Addr().String()
 	require.Contains(t, requests, request{
 		Method: "GET",
+		Host:   host,
 		URI:    "/api?v=1",
 		Header: nil,
 		Body:   "",
 	})
 	require.Contains(t, requests, request{
 		Method: "GET",
+		Host:   host,
 		URI:    "/api?v=2",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
 	})
 	require.Contains(t, requests, request{
 		Method: "GET",
+		Host:   host,
 		URI:    "/api?v=3",
 		Header: http.Header{"X-Foo": []string{"Bar"}},
 		Body:   "",
 	})
 	require.Contains(t, requests, request{
 		Method: "POST",
+		Host:   host,
 		URI:    "/api?v=4",
-		Header: http.Header{"X-Hello": []string{"World"}},
+		Header: http.Header{"Content-Type": []string{"application/json"}},
 		Body:   `{"key": "value"}`,
 	})
 }
@@ -363,7 +400,7 @@ func TestFailureTape(t *testing.T) {
 		}
 		h := http.Header{}
 		for k, vs := range r.Header {
-			if strings.HasPrefix(k, "X-") {
+			if k == "Content-Type" || strings.HasPrefix(k, "X-") {
 				h[k] = vs
 			}
 		}
@@ -391,7 +428,7 @@ func TestFailureTape(t *testing.T) {
 %[1]s/api?v=1
 %[1]s/api?v=2 -H 'X-Foo: Bar'
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'X-Hello: World'
+%[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
