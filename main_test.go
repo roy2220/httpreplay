@@ -320,8 +320,7 @@ func TestProgressResumption(t *testing.T) {
 %[1]s/api?v=3 -X GET -H 'X-Foo: Bar' # my comment
 
    # %[1]s/api?v=333 -X GET -H 'X-Foo: Bar'
-   %[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
-`, server.URL)[1:], 0644)
+   %[1]s/api?v=4 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'`, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
 	out := bytes.NewBuffer(nil)
@@ -354,8 +353,40 @@ func TestProgressResumption(t *testing.T) {
 		true,
 	)
 
+	Main(
+		[]string{
+			"-c", "100",
+			"-q", "0",
+			tapeFilePath,
+		},
+		out,
+		mockExit,
+		nil,
+		true,
+	)
+
+	{
+		f, err := os.OpenFile(tapeFilePath, os.O_APPEND|os.O_WRONLY, 0644)
+		require.NoError(t, err)
+		_, err = fmt.Fprintf(f, "\n%s/api?v=5 -d 'foo=bar'\n", server.URL)
+		require.NoError(t, err)
+		f.Close()
+	}
+
+	Main(
+		[]string{
+			"-c", "100",
+			"-q", "0",
+			tapeFilePath,
+		},
+		out,
+		mockExit,
+		nil,
+		true,
+	)
+
 	server.Close()
-	require.Len(t, requests, 4)
+	require.Len(t, requests, 5)
 	host := server.Listener.Addr().String()
 	require.Contains(t, requests, request{
 		Method: "GET",
@@ -384,6 +415,13 @@ func TestProgressResumption(t *testing.T) {
 		URI:    "/api?v=4",
 		Header: http.Header{"Content-Type": []string{"application/json"}},
 		Body:   `{"key": "value"}`,
+	})
+	require.Contains(t, requests, request{
+		Method: "POST",
+		Host:   host,
+		URI:    "/api?v=5",
+		Header: http.Header{"Content-Type": []string{"application/x-www-form-urlencoded"}},
+		Body:   "foo=bar",
 	})
 }
 
@@ -535,4 +573,30 @@ func TestBadArgs(t *testing.T) {
 	})
 
 	require.Contains(t, out.String(), "should limit at least one of qps or concurrency")
+}
+
+func TestEmptyTapeFile(t *testing.T) {
+	tempDirPath := t.TempDir()
+	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
+	err := os.WriteFile(tapeFilePath, nil, 0644)
+	require.NoError(t, err)
+
+	out := bytes.NewBuffer(nil)
+	defer func() { t.Log(out.String()) }()
+
+	Main(
+		[]string{
+			"-c", "100",
+			"-q", "0",
+			tapeFilePath,
+		},
+		out,
+		mockExit,
+		nil,
+		true,
+	)
+
+	require.Regexp(t, "final progress:.* tapePosition=0", out.String())
+	require.Regexp(t, "final progress:.* successful=0", out.String())
+	require.Regexp(t, "final progress:.* failed=0", out.String())
 }

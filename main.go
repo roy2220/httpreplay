@@ -91,14 +91,14 @@ func Main(
 }
 
 const (
-	tapeBufferSize           = 16 * 1024 * 1024
 	tapePositionFileExt      = ".httpreplay-pos"
 	failureTapeFileExt       = ".httpreplay-failure"
+	failureTapeBufferSize    = 16 * 1024 * 1024
 	flushFailureTapeInterval = 500 * time.Millisecond
 )
 
 type httpRequester struct {
-	tapeFile                *os.File
+	tapeReader              *tapeReader
 	tapePositionTracker     *tapePositionTracker
 	failureTapeFile         *os.File
 	failureTapeLock         sync.Mutex
@@ -134,13 +134,13 @@ func newHttpRequester(
 	debug bool,
 	logger *log.Logger,
 ) (_ *httpRequester, returnedErr error) {
-	tapeFile, err := os.Open(tapeFileName)
+	tapeReader, err := newTapeReader(tapeFileName)
 	if err != nil {
-		return nil, fmt.Errorf("open tape file %q: %w", tapeFileName, err)
+		return nil, fmt.Errorf("create tape reader: %w", err)
 	}
 	defer func() {
 		if returnedErr != nil {
-			tapeFile.Close()
+			tapeReader.Close()
 		}
 	}()
 	tapePositionFileName := tapeFileName + tapePositionFileExt
@@ -159,7 +159,7 @@ func newHttpRequester(
 	failureTapeFileName := tapeFileName + failureTapeFileExt
 	failureTapeFile, err := os.OpenFile(failureTapeFileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("open failure tape file %q: %w", failureTapeFileName, err)
+		return nil, fmt.Errorf("open failure tape file: %w", err)
 	}
 	defer func() {
 		if returnedErr != nil {
@@ -196,10 +196,10 @@ func newHttpRequester(
 		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
 	r := &httpRequester{
-		tapeFile:                tapeFile,
+		tapeReader:              tapeReader,
 		tapePositionTracker:     tapePositionTracker,
 		failureTapeFile:         failureTapeFile,
-		failureTape:             bufio.NewWriterSize(failureTapeFile, tapeBufferSize),
+		failureTape:             bufio.NewWriterSize(failureTapeFile, failureTapeBufferSize),
 		maxNumberOfHttpRequests: maxNumberOfHttpRequests,
 		qpsLimit:                qpsLimit,
 		concurrencyLimit:        concurrencyLimit,
@@ -238,14 +238,14 @@ func (r *httpRequester) start() {
 func (r *httpRequester) Close() {
 	r.stop()
 
-	err := r.tapeFile.Close()
+	err := r.tapeReader.Close()
 	if err != nil {
-		r.logger.Printf("[WARN] failed to close tape file: %v", err)
+		r.logger.Printf("[WARN] failed to close tape reader: %v", err)
 	}
 
 	err = r.tapePositionTracker.Close()
 	if err != nil {
-		r.logger.Printf("[WARN] failed to close tape position file: %v", err)
+		r.logger.Printf("[WARN] failed to close tape position tracker: %v", err)
 	}
 
 	var failureTapeFileIsEmpty bool
@@ -310,19 +310,19 @@ func (r *httpRequester) dispatchHttpRequests() {
 
 	var numberOfHttpRequests int
 	for tapePosition, line := range r.readTape() {
-		curlCommand1, err := parseCurlCommand(line)
+		curlCommand, err := parseCurlCommand(line)
 		if err != nil {
 			r.tapePositionTracker.UpdateTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to parse curl command from line %q: %v", line, err)
 			continue
 		}
-		if curlCommand1 == (curlCommand{}) {
+		if curlCommand.IsEmpty() {
 			// ignore empty curl command
 			r.tapePositionTracker.UpdateTapePosition(tapePosition)
 			continue
 		}
 
-		httpRequest, err := r.buildHttpRequest(curlCommand1)
+		httpRequest, err := r.buildHttpRequest(curlCommand)
 		if err != nil {
 			r.tapePositionTracker.UpdateTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to build http request: %v", err)
@@ -366,23 +366,17 @@ func (r *httpRequester) readTape() iter.Seq2[int64, string] {
 	lastTapePosition := r.tapePositionTracker.TapePosition()
 
 	return func(yield func(int64, string) bool) {
-		scanner := bufio.NewScanner(r.tapeFile)
-		scanner.Buffer(nil, tapeBufferSize)
-
-		for tapePosition := int64(1); scanner.Scan(); tapePosition++ {
+		for tapePosition := int64(1); ; tapePosition++ {
+			line, ok := r.tapeReader.ReadLine()
+			if !ok {
+				break
+			}
 			if tapePosition <= lastTapePosition {
 				continue
 			}
-
-			line := scanner.Text()
-
 			if !yield(tapePosition, line) {
 				return
 			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			r.logger.Printf("[WARN] failed to scan tape file: %v", err)
 		}
 	}
 }
@@ -498,6 +492,8 @@ func parseCurlCommand(line string) (curlCommand, error) {
 	}
 	return curlCommand1, nil
 }
+
+func (c *curlCommand) IsEmpty() bool { return c.URL == "" }
 
 func getFlagValue(arg, flagName, longFlagName string, popNextArg func() (string, bool)) (string, error, bool) {
 	longFlagMode := false
@@ -667,8 +663,64 @@ func (r *httpRequester) logProgress() {
 
 func (r *httpRequester) Idleness() <-chan struct{} { return r.idleness }
 
+type tapeReader struct {
+	mMap        mmap.MMap
+	unreadLines string
+}
+
+func newTapeReader(tapeFileName string) (_ *tapeReader, returnedErr error) {
+	file, err := os.Open(tapeFileName)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fileInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("%q is not regular file", tapeFileName)
+	}
+	if fileInfo.Size() == 0 {
+		return &tapeReader{}, nil
+	}
+
+	mMap, err := mmap.Map(file, mmap.RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if returnedErr != nil {
+			mMap.Unmap()
+		}
+	}()
+
+	return &tapeReader{
+		mMap:        mMap,
+		unreadLines: b2s(mMap),
+	}, nil
+}
+
+func (r *tapeReader) Close() error {
+	if r.mMap == nil {
+		return nil
+	}
+	r.unreadLines = ""
+	return r.mMap.Unmap()
+}
+
+func (r *tapeReader) ReadLine() (string, bool) {
+	if r.unreadLines == "" {
+		return "", false
+	}
+	var line string
+	line, r.unreadLines, _ = strings.Cut(r.unreadLines, "\n")
+	line = strings.TrimSuffix(line, "\r")
+	return line, true
+}
+
 type tapePositionTracker struct {
-	file         *os.File
 	mMap         mmap.MMap
 	tapePosition *int64
 }
@@ -678,11 +730,7 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if returnedErr != nil {
-			file.Close()
-		}
-	}()
+	defer file.Close()
 
 	fileInfo, err := file.Stat()
 	if err != nil {
@@ -714,19 +762,15 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 		return nil, fmt.Errorf("invalid tape position %v from file %q", *tapePosition, tapePositionFileName)
 	}
 
-	t := &tapePositionTracker{
-		file:         file,
+	return &tapePositionTracker{
 		mMap:         mMap,
 		tapePosition: tapePosition,
-	}
-	return t, nil
+	}, nil
 }
 
 func (t *tapePositionTracker) Close() error {
 	t.tapePosition = nil
-	err1 := t.mMap.Unmap()
-	err2 := t.file.Close()
-	return errors.Join(err1, err2)
+	return t.mMap.Unmap()
 }
 
 func (t *tapePositionTracker) TapePosition() int64 { return atomic.LoadInt64(t.tapePosition) }
@@ -734,3 +778,5 @@ func (t *tapePositionTracker) TapePosition() int64 { return atomic.LoadInt64(t.t
 func (t *tapePositionTracker) UpdateTapePosition(tapePosition int64) {
 	atomic.StoreInt64(t.tapePosition, tapePosition)
 }
+
+func b2s(b []byte) string { return unsafe.String(unsafe.SliceData(b), len(b)) }
