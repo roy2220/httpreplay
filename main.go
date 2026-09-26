@@ -14,6 +14,7 @@ import (
 	"net/textproto"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,40 @@ func main() {
 	Main(os.Args[1:], os.Stdout, os.Exit, exitSignal, debug)
 }
 
+const (
+	tapePositionFileExt      = ".httpreplay-pos"
+	failureTapeFileExt       = ".httpreplay-failure"
+	failureTapeBufferSize    = 16 * 1024 * 1024
+	flushFailureTapeInterval = 500 * time.Millisecond
+)
+
+var (
+	version          string
+	defaultUserAgent []string
+)
+
+func init() {
+	version = "unknown"
+	if buildInfo, ok := debug.ReadBuildInfo(); ok {
+		if v := buildInfo.Main.Version; v != "" {
+			version = v
+		}
+	}
+	defaultUserAgent = []string{"httpreplay/" + strings.TrimPrefix(version, "v")}
+}
+
+type args struct {
+	TapeFileName            string `arg:"required,positional" placeholder:"TAPE-FILE" help:"the tape file containing HTTP requests"`
+	MaxNumberOfHttpRequests int    `arg:"-n,--" placeholder:"NUM" help:"early stop after a specified number of http requests, no early stop if less than 0" default:"-1"`
+	QpsLimit                int    `arg:"-q,--" placeholder:"QPS" help:"the limit of qps, no limit if less than 1" default:"1"`
+	ConcurrencyLimit        int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"the limit of concurrency, no limit if less than 1" default:"1"`
+	Timeout                 int    `arg:"-t,--" placeholder:"TIMEOUT" help:"the timeout of HTTP request in seconds, no timeout if less than 1" default:"10"`
+	FollowRedirects         bool   `arg:"-f,--" help:"follow HTTP redirects" default:"false"`
+	DryRun                  bool   `arg:"-d,--" help:"dry-run mode" default:"false"`
+}
+
+func (args) Version() string { return "httpreplay " + version }
+
 // Main is the entry point of the program.
 func Main(
 	rawArgs []string,
@@ -43,15 +78,7 @@ func Main(
 	exitSignal <-chan os.Signal,
 	debug bool,
 ) {
-	var args struct {
-		TapeFileName            string `arg:"required,positional" placeholder:"TAPE-FILE" help:"the tape file containing HTTP requests"`
-		MaxNumberOfHttpRequests int    `arg:"-n,--" placeholder:"NUM" help:"early stop after a specified number of http requests, no early stop if less than 0" default:"-1"`
-		QpsLimit                int    `arg:"-q,--" placeholder:"QPS" help:"the limit of qps, no limit if less than 1" default:"1"`
-		ConcurrencyLimit        int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"the limit of concurrency, no limit if less than 1" default:"1"`
-		Timeout                 int    `arg:"-t,--" placeholder:"TIMEOUT" help:"the timeout of HTTP request in seconds, no timeout if less than 1" default:"10"`
-		FollowRedirects         bool   `arg:"-f,--" help:"follow HTTP redirects" default:"false"`
-		DryRun                  bool   `arg:"-d,--" help:"dry-run mode" default:"false"`
-	}
+	var args args
 	{
 		parser, err := arg.NewParser(arg.Config{Exit: exit, Out: out}, &args)
 		if err != nil {
@@ -89,13 +116,6 @@ func Main(
 		logger.Printf("[INFO] http requester is stopping...")
 	}
 }
-
-const (
-	tapePositionFileExt      = ".httpreplay-pos"
-	failureTapeFileExt       = ".httpreplay-failure"
-	failureTapeBufferSize    = 16 * 1024 * 1024
-	flushFailureTapeInterval = 500 * time.Millisecond
-)
 
 type httpRequester struct {
 	tapeReader              *tapeReader
@@ -397,7 +417,11 @@ func parseCurlCommand(line string) (curlCommand, error) {
 		return curlCommand{}, nil
 	}
 
-	var curlCommand1 curlCommand
+	var (
+		curlCommand1           curlCommand
+		contentTypeHeaderIsSet bool
+		urlIsPresent           bool
+	)
 	i := 0
 	n := len(args)
 	popNextArg := func() (string, bool) {
@@ -407,10 +431,6 @@ func parseCurlCommand(line string) (curlCommand, error) {
 		}
 		return "", false
 	}
-	var (
-		contentTypeHeaderIsSet bool
-		urlIsProvided          bool
-	)
 	for ; i < n; i++ {
 		arg := args[i]
 		if v, err, ok := getFlagValue(arg, "-X", "--request", popNextArg); ok {
@@ -458,12 +478,12 @@ func parseCurlCommand(line string) (curlCommand, error) {
 		if strings.HasPrefix(arg, "-") {
 			return curlCommand{}, fmt.Errorf("unsupported flag: %v", arg)
 		}
-		if !urlIsProvided {
+		if !urlIsPresent {
 			curlCommand1.URL = arg
-			urlIsProvided = true
+			urlIsPresent = true
 		}
 	}
-	if !urlIsProvided {
+	if !urlIsPresent {
 		return curlCommand{}, fmt.Errorf("missing url")
 	}
 	if curlCommand1.URL == "" {
@@ -539,8 +559,11 @@ func (r *httpRequester) buildHttpRequest(curlCommand curlCommand) (*http.Request
 		}
 		httpRequest.Header = http.Header(header)
 	}
-	if host := httpRequest.Header.Get("Host"); host != "" {
-		httpRequest.Host = host
+	if vs := httpRequest.Header["Host"]; len(vs) >= 1 {
+		httpRequest.Host = vs[0]
+	}
+	if len(httpRequest.Header["User-Agent"]) == 0 {
+		httpRequest.Header["User-Agent"] = defaultUserAgent
 	}
 	if r.debug {
 		if rawBody == nil {
