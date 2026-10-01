@@ -435,9 +435,13 @@ type curlCommand struct {
 	Data    *bytes.Buffer
 }
 
-func parseCurlCommand(line string) (curlCommand, error) {
+var parser = func() *shellwords.Parser {
 	parser := shellwords.NewParser()
 	parser.ParseComment = true
+	return parser
+}()
+
+func parseCurlCommand(line string) (curlCommand, error) {
 	args, err := parser.Parse(line)
 	if err != nil {
 		return curlCommand{}, fmt.Errorf("parse line: %w", err)
