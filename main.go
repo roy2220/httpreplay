@@ -24,7 +24,7 @@ import (
 
 	"github.com/alexflint/go-arg"
 	"github.com/edsrzf/mmap-go"
-	"github.com/google/shlex"
+	"github.com/mattn/go-shellwords"
 	"go.uber.org/ratelimit"
 )
 
@@ -436,9 +436,11 @@ type curlCommand struct {
 }
 
 func parseCurlCommand(line string) (curlCommand, error) {
-	args, err := shlex.Split(line)
+	parser := shellwords.NewParser()
+	parser.ParseComment = true
+	args, err := parser.Parse(line)
 	if err != nil {
-		return curlCommand{}, fmt.Errorf("split line: %w", err)
+		return curlCommand{}, fmt.Errorf("parse line: %w", err)
 	}
 	if len(args) == 0 {
 		return curlCommand{}, nil

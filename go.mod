@@ -5,7 +5,7 @@ go 1.24
 require (
 	github.com/alexflint/go-arg v1.6.0
 	github.com/edsrzf/mmap-go v1.2.0
-	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
+	github.com/mattn/go-shellwords v1.0.15
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/ratelimit v0.3.1
 )
