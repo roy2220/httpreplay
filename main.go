@@ -59,16 +59,24 @@ func init() {
 }
 
 type args struct {
-	TapeFileName            string `arg:"required,positional" placeholder:"TAPE-FILE" help:"the tape file containing HTTP requests"`
-	MaxNumberOfHttpRequests int    `arg:"-n,--" placeholder:"NUM" help:"early stop after a specified number of http requests, no early stop if less than 0" default:"-1"`
-	QpsLimit                int    `arg:"-q,--" placeholder:"QPS" help:"the limit of qps, no limit if less than 1" default:"1"`
-	ConcurrencyLimit        int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"the limit of concurrency, no limit if less than 1" default:"1"`
-	Timeout                 int    `arg:"-t,--" placeholder:"TIMEOUT" help:"the timeout of HTTP request in seconds, no timeout if less than 1" default:"10"`
+	TapeFileName            string `arg:"required,positional" placeholder:"TAPE-FILE" help:"path to the tape file containing HTTP requests"`
+	MaxNumberOfHttpRequests int    `arg:"-n,--" placeholder:"NUM" help:"stop after NUM requests, no limit if less than 0" default:"-1"`
+	QpsLimit                int    `arg:"-q,--" placeholder:"QPS" help:"maximum QPS, no limit if less than 1" default:"1"`
+	ConcurrencyLimit        int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"maximum concurrency, no limit if less than 1" default:"1"`
+	Timeout                 int    `arg:"-t,--" placeholder:"TIMEOUT" help:"request timeout in seconds, no timeout if less than 1" default:"10"`
 	FollowRedirects         bool   `arg:"-f,--" help:"follow HTTP redirects" default:"false"`
 	DryRun                  bool   `arg:"-d,--" help:"dry-run mode" default:"false"`
+	DeliverySemantics       string `arg:"--,--delivery-semantics" placeholder:"SEMANTICS" help:"delivery semantics for resuming after a crash (one of at-least-once, at-most-once)" default:"at-least-once"`
 }
 
 func (args) Version() string { return "httpreplay " + version }
+
+type deliverySemantics int
+
+const (
+	deliveryAtLeastOnce deliverySemantics = iota
+	deliveryAtMostOnce
+)
 
 // Main is the entry point of the program.
 func Main(
@@ -79,6 +87,7 @@ func Main(
 	debug bool,
 ) {
 	var args args
+	var deliverySemantics deliverySemantics
 	{
 		parser, err := arg.NewParser(arg.Config{Exit: exit, Out: out}, &args)
 		if err != nil {
@@ -86,6 +95,14 @@ func Main(
 			exit(1)
 		}
 		parser.MustParse(rawArgs)
+		switch args.DeliverySemantics {
+		case "at-least-once":
+			deliverySemantics = deliveryAtLeastOnce
+		case "at-most-once":
+			deliverySemantics = deliveryAtMostOnce
+		default:
+			parser.Fail("delivery semantics should be one of at-least-once or at-most-once")
+		}
 		if args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
 			parser.Fail("should limit at least one of qps or concurrency")
 		}
@@ -101,6 +118,7 @@ func Main(
 		time.Duration(args.Timeout)*time.Second,
 		args.FollowRedirects,
 		args.DryRun,
+		deliverySemantics,
 		debug,
 		logger,
 	)
@@ -128,6 +146,7 @@ type httpRequester struct {
 	concurrencyLimit        int
 	httpClient              *http.Client
 	dryRun                  bool
+	deliverySemantics       deliverySemantics
 	debug                   bool
 	logger                  *log.Logger
 
@@ -151,6 +170,7 @@ func newHttpRequester(
 	timeout time.Duration,
 	followRedirects bool,
 	dryRun bool,
+	deliverySemantics deliverySemantics,
 	debug bool,
 	logger *log.Logger,
 ) (_ *httpRequester, returnedErr error) {
@@ -225,6 +245,7 @@ func newHttpRequester(
 		concurrencyLimit:        concurrencyLimit,
 		httpClient:              &httpClient,
 		dryRun:                  dryRun,
+		deliverySemantics:       deliverySemantics,
 		debug:                   debug,
 		logger:                  logger,
 		idleness:                make(chan struct{}),
@@ -332,19 +353,19 @@ func (r *httpRequester) dispatchHttpRequests() {
 	for tapePosition, line := range r.readTape() {
 		curlCommand, err := parseCurlCommand(line)
 		if err != nil {
-			r.tapePositionTracker.UpdateTapePosition(tapePosition)
+			r.tapePositionTracker.CommitTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to parse curl command from line %q: %v", line, err)
 			continue
 		}
 		if curlCommand.IsEmpty() {
 			// ignore empty curl command
-			r.tapePositionTracker.UpdateTapePosition(tapePosition)
+			r.tapePositionTracker.CommitTapePosition(tapePosition)
 			continue
 		}
 
 		httpRequest, err := r.buildHttpRequest(curlCommand)
 		if err != nil {
-			r.tapePositionTracker.UpdateTapePosition(tapePosition)
+			r.tapePositionTracker.CommitTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to build http request: %v", err)
 			continue
 		}
@@ -367,7 +388,10 @@ func (r *httpRequester) dispatchHttpRequests() {
 			return
 		}
 
-		r.tapePositionTracker.UpdateTapePosition(tapePosition)
+		if r.deliverySemantics == deliveryAtMostOnce {
+			r.tapePositionTracker.CommitTapePosition(tapePosition)
+		}
+
 		wg.Add(1)
 		go func() {
 			defer func() {
@@ -376,6 +400,9 @@ func (r *httpRequester) dispatchHttpRequests() {
 			}()
 
 			r.doHttpRequest(httpRequest, line)
+			if r.deliverySemantics == deliveryAtLeastOnce {
+				r.tapePositionTracker.CommitTapePosition(tapePosition)
+			}
 		}()
 	}
 
@@ -746,6 +773,9 @@ func (r *tapeReader) ReadLine() (string, bool) {
 type tapePositionTracker struct {
 	mMap         mmap.MMap
 	tapePosition *int64
+
+	lock                 sync.Mutex
+	pendingTapePositions map[int64]struct{}
 }
 
 func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker, returnedErr error) {
@@ -786,8 +816,9 @@ func newTapePositionTracker(tapePositionFileName string) (_ *tapePositionTracker
 	}
 
 	return &tapePositionTracker{
-		mMap:         mMap,
-		tapePosition: tapePosition,
+		mMap:                 mMap,
+		tapePosition:         tapePosition,
+		pendingTapePositions: map[int64]struct{}{},
 	}, nil
 }
 
@@ -798,8 +829,25 @@ func (t *tapePositionTracker) Close() error {
 
 func (t *tapePositionTracker) TapePosition() int64 { return atomic.LoadInt64(t.tapePosition) }
 
-func (t *tapePositionTracker) UpdateTapePosition(tapePosition int64) {
-	atomic.StoreInt64(t.tapePosition, tapePosition)
+func (t *tapePositionTracker) CommitTapePosition(tapePosition int64) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	if atomic.CompareAndSwapInt64(t.tapePosition, tapePosition-1, tapePosition) {
+		for {
+			tapePosition++
+
+			n := len(t.pendingTapePositions)
+			delete(t.pendingTapePositions, tapePosition)
+			if len(t.pendingTapePositions) == n {
+				return
+			}
+
+			atomic.StoreInt64(t.tapePosition, tapePosition)
+		}
+	} else {
+		t.pendingTapePositions[tapePosition] = struct{}{}
+	}
 }
 
 func b2s(b []byte) string { return unsafe.String(unsafe.SliceData(b), len(b)) }

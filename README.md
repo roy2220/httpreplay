@@ -41,7 +41,7 @@ GOBIN=${PWD} CGO_ENABLED=0 go install github.com/roy2220/httpreplay@latest
 Run `httpreplay` with the required tape file and optional flags:
 
 ```bash
-httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d]
+httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d] [--delivery-semantics SEMANTICS]
 ````
 
 ### Arguments
@@ -49,12 +49,13 @@ httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d]
 | Argument | Description | Default |
 | :--- | :--- | :--- |
 | **TAPE-FILE** (required) | Path to the tape file containing HTTP requests. | |
-| **-n NUM** | Early stop after `NUM` HTTP requests. Set to `< 0` for no early stop. | `-1` |
-| **-q QPS** | Queries per second limit. Set to `< 1` for no limit. | `1` |
-| **-c CONCURRENCY** | Concurrent requests limit. Set to `< 1` for no limit. | `1` |
-| **-t TIMEOUT** | HTTP request timeout in seconds. Set to `< 1` for no timeout. | `10` |
+| **-n NUM** | Stop after `NUM` requests, no limit if less than 0. | `-1` |
+| **-q QPS** | Maximum QPS, no limit if less than 1. | `1` |
+| **-c CONCURRENCY** | Maximum concurrency, no limit if less than 1. | `1` |
+| **-t TIMEOUT** | Request timeout in seconds, no timeout if less than 1. | `10` |
 | **-f** | Follow HTTP redirects. | `false` |
 | **-d** | **Dry-run mode**: Preview requests without sending them. | `false` |
+| **--delivery-semantics SEMANTICS** | Delivery semantics used when resuming after a crash: `at-least-once` or `at-most-once`. See [Delivery Semantics](#delivery-semantics). | `at-least-once` |
 
 > **Note**: At least one of QPS or concurrency must be limited (i.e., $\ge 1$).
 
@@ -125,7 +126,7 @@ https://example.com/api/auth -X GET -H "Authorization: Bearer token"
 `httpreplay` creates companion files next to your `TAPE-FILE` to manage state:
 
 - **Failure Tape File** (`TAPE-FILE.httpreplay-failure`): Stores the raw lines of any failed requests for later analysis or retry. *Flushed every 500ms.*
-- **Position File** (`TAPE-FILE.httpreplay-pos`): Tracks the last processed request index for resuming. *Uses memory-mapping for atomic, resilient updates.*
+- **Position File** (`TAPE-FILE.httpreplay-pos`): Tracks the last processed request index for resuming. What counts as processed depends on the delivery semantics. *Uses memory-mapping for atomic, resilient updates.*
 - **Dry-run Position File** (`TAPE-FILE.httpreplay-pos.dry-run`): A separate position file is used when running in dry-run mode (`-d`) to prevent overwriting the main position file.
 
 -----
@@ -141,6 +142,12 @@ https://example.com/api/auth -X GET -H "Authorization: Bearer token"
 ```
 [INFO] current progress: tapePosition=100 qps=50 concurrency=5 successful=95 failed=5 successRate=0.95
 ```
+
+-----
+
+## Delivery Semantics
+
+By default, `httpreplay` resumes with **at-least-once** semantics: a request counts as processed once completed, and after an abrupt crash (`SIGKILL`, out of memory) everything after the last completed-in-order request is resent — including requests whose responses had already arrived but were stuck behind a slower one. Pass `--delivery-semantics at-most-once` to count requests as processed once sent instead, so a resumed run never duplicates requests but skips the ones that were in flight at crash time. A graceful stop (`Ctrl+C` / `SIGTERM`) always lets in-flight requests finish under either setting.
 
 -----
 

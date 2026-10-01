@@ -1,9 +1,11 @@
 package main_test
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,9 +13,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	. "github.com/roy2220/httpreplay"
 	"github.com/stretchr/testify/require"
@@ -32,6 +36,8 @@ type request struct {
 }
 
 func TestNormal(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	var server *httptest.Server
@@ -163,6 +169,8 @@ func TestNormal(t *testing.T) {
 }
 
 func TestFollowRedirects(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	var server *httptest.Server
@@ -239,6 +247,8 @@ func TestFollowRedirects(t *testing.T) {
 }
 
 func TestDryRun(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +313,8 @@ func TestDryRun(t *testing.T) {
 }
 
 func TestProgressResumption(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -445,6 +457,8 @@ func TestProgressResumption(t *testing.T) {
 }
 
 func TestFailureTape(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -521,6 +535,8 @@ func TestFailureTape(t *testing.T) {
 }
 
 func TestMaxNumberOfHttpRequests(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -575,6 +591,8 @@ func TestMaxNumberOfHttpRequests(t *testing.T) {
 }
 
 func TestBadArgs(t *testing.T) {
+	t.Parallel()
+
 	out := bytes.NewBuffer(nil)
 	defer func() { t.Log(out.String()) }()
 
@@ -596,6 +614,8 @@ func TestBadArgs(t *testing.T) {
 }
 
 func TestEmptyTapeFile(t *testing.T) {
+	t.Parallel()
+
 	tempDirPath := t.TempDir()
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, nil, 0644)
@@ -619,4 +639,160 @@ func TestEmptyTapeFile(t *testing.T) {
 	require.Regexp(t, "final progress:.* tapePosition=0", out.String())
 	require.Regexp(t, "final progress:.* successful=0", out.String())
 	require.Regexp(t, "final progress:.* failed=0", out.String())
+}
+
+func TestLargeTapeFile(t *testing.T) {
+	t.Parallel()
+
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
+		requestCount.Add(1)
+	}))
+	t.Cleanup(server.Close)
+
+	tempDirPath := t.TempDir()
+	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
+	f, err := os.OpenFile(tapeFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	require.NoError(t, err)
+	buffer := bufio.NewWriterSize(f, 8*1024*1024)
+	line := fmt.Sprintf("%s/test\n", server.URL)
+	for range 2000 {
+		_, err = buffer.WriteString(line)
+		require.NoError(t, err)
+	}
+	err = buffer.Flush()
+	require.NoError(t, err)
+	err = f.Close()
+	require.NoError(t, err)
+
+	Main(
+		[]string{
+			"-c", "100",
+			"-q", "0",
+			"-t", "1",
+			tapeFilePath,
+		},
+		io.Discard,
+		mockExit,
+		nil,
+		false,
+	)
+
+	data, err := os.ReadFile(tapeFilePath + ".httpreplay-pos")
+	require.NoError(t, err)
+	require.Len(t, data, 8)
+	tapePosition := *(*int64)(unsafe.Pointer(unsafe.SliceData(data)))
+	require.Equal(t, int64(2000), tapePosition)
+	require.Equal(t, int64(2000), requestCount.Load())
+}
+
+func TestDeliveryAtLeastOnce(t *testing.T) {
+	t.Parallel()
+
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.RequestURI, "k=51") {
+			<-t.Context().Done()
+		}
+		requestCount.Add(1)
+	}))
+	t.Cleanup(server.Close)
+
+	tempDirPath := t.TempDir()
+	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
+	f, err := os.OpenFile(tapeFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	require.NoError(t, err)
+	buffer := bufio.NewWriterSize(f, 8*1024*1024)
+	for i := range 100 {
+		line := fmt.Sprintf("%s/test?k=%d\n", server.URL, i+1)
+		_, err = buffer.WriteString(line)
+		require.NoError(t, err)
+	}
+	err = buffer.Flush()
+	require.NoError(t, err)
+	err = f.Close()
+	require.NoError(t, err)
+
+	go func() {
+		Main(
+			[]string{
+				"-c", "10",
+				"-q", "0",
+				"-t", "-1",
+				"--delivery-semantics", "at-least-once",
+				tapeFilePath,
+			},
+			io.Discard,
+			mockExit,
+			nil,
+			false,
+		)
+	}()
+
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(tapeFilePath + ".httpreplay-pos")
+		if os.IsNotExist(err) {
+			return false
+		}
+		require.NoError(t, err)
+		require.Len(t, data, 8)
+		tapePosition := *(*int64)(unsafe.Pointer(unsafe.SliceData(data)))
+		return tapePosition == 50 && requestCount.Load() == 99
+	}, 5*time.Second, 500*time.Millisecond)
+}
+
+func TestDeliveryAtMostOnce(t *testing.T) {
+	t.Parallel()
+
+	var requestCount atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.RequestURI, "k=51") {
+			<-t.Context().Done()
+		}
+		requestCount.Add(1)
+	}))
+	t.Cleanup(server.Close)
+
+	tempDirPath := t.TempDir()
+	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
+	f, err := os.OpenFile(tapeFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	require.NoError(t, err)
+	buffer := bufio.NewWriterSize(f, 8*1024*1024)
+	for i := range 100 {
+		line := fmt.Sprintf("%s/test?k=%d\n", server.URL, i+1)
+		_, err = buffer.WriteString(line)
+		require.NoError(t, err)
+	}
+	err = buffer.Flush()
+	require.NoError(t, err)
+	err = f.Close()
+	require.NoError(t, err)
+
+	go func() {
+		Main(
+			[]string{
+				"-c", "10",
+				"-q", "0",
+				"-t", "-1",
+				"--delivery-semantics", "at-most-once",
+				tapeFilePath,
+			},
+			io.Discard,
+			mockExit,
+			nil,
+			false,
+		)
+	}()
+
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(tapeFilePath + ".httpreplay-pos")
+		if os.IsNotExist(err) {
+			return false
+		}
+		require.NoError(t, err)
+		require.Len(t, data, 8)
+		tapePosition := *(*int64)(unsafe.Pointer(unsafe.SliceData(data)))
+		return tapePosition == 100 && requestCount.Load() == 99
+	}, 5*time.Second, 500*time.Millisecond)
 }
