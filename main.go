@@ -37,10 +37,10 @@ func main() {
 }
 
 const (
-	tapePositionFileExt      = ".httpreplay-pos"
-	failureTapeFileExt       = ".httpreplay-failure"
-	failureTapeBufferSize    = 16 * 1024 * 1024
-	flushFailureTapeInterval = 500 * time.Millisecond
+	tapePositionFileExt   = ".httpreplay-pos"
+	failureTapeFileExt    = ".httpreplay-failure"
+	failureTapeBufferSize = 16 * 1024 * 1024
+	syncWritesInterval    = 500 * time.Millisecond
 )
 
 var (
@@ -266,7 +266,7 @@ func (r *httpRequester) start() {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		r.flushFailureTapePeriodically()
+		r.syncWritesPeriodically()
 	}()
 
 	r.wg.Add(1)
@@ -657,8 +657,8 @@ func (r *httpRequester) recordFailedHttpRequest(line string) {
 	}
 }
 
-func (r *httpRequester) flushFailureTapePeriodically() {
-	ticker := time.NewTicker(flushFailureTapeInterval)
+func (r *httpRequester) syncWritesPeriodically() {
+	ticker := time.NewTicker(syncWritesInterval)
 	defer ticker.Stop()
 
 	for next := true; next; {
@@ -668,16 +668,29 @@ func (r *httpRequester) flushFailureTapePeriodically() {
 		case <-ticker.C:
 		}
 
-		r.failureTapeLock.Lock()
-		err := r.failureTape.Flush()
-		r.failureTapeLock.Unlock()
-		if err != nil {
-			r.logger.Printf("[WARN] failed to flush failure tape: %v", err)
+		{
+			err := r.tapePositionTracker.Flush()
+			if err != nil {
+				r.logger.Printf("[WARN] failed to sync writes to tape position: %v", err)
+			}
+		}
+
+		{
+			r.failureTapeLock.Lock()
+			err1 := r.failureTape.Flush()
+			err2 := r.failureTapeFile.Sync()
+			r.failureTapeLock.Unlock()
+			err := errors.Join(err1, err2)
+			if err != nil {
+				r.logger.Printf("[WARN] failed to sync writes failure tape: %v", err)
+			}
 		}
 	}
 
+	r.logger.Println("[INFO] writes synced to tape position")
+
 	if n := r.stats.failed.Load(); n >= 1 {
-		r.logger.Printf("[INFO] failure tape flushed; failedHttpRequestCount=%v", n)
+		r.logger.Printf("[INFO] writes synced to failure tape; failedHttpRequestCount=%v", n)
 	}
 }
 
@@ -851,5 +864,7 @@ func (t *tapePositionTracker) CommitTapePosition(tapePosition int64) {
 		t.pendingTapePositions[tapePosition] = struct{}{}
 	}
 }
+
+func (t *tapePositionTracker) Flush() error { return t.mMap.Flush() }
 
 func b2s(b []byte) string { return unsafe.String(unsafe.SliceData(b), len(b)) }
