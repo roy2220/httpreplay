@@ -706,6 +706,13 @@ func (r *httpRequester) logProgress() {
 		case <-ticker.C:
 		}
 
+		var title string
+		if next {
+			title = "current progress"
+		} else {
+			title = "final progress"
+		}
+
 		tapePosition := r.tapePositionTracker.TapePosition()
 		concurrency := r.stats.concurrency.Load()
 		total := r.stats.total.Load()
@@ -713,15 +720,15 @@ func (r *httpRequester) logProgress() {
 		prevTotal = total
 		successful := r.stats.successful.Load()
 		failed := r.stats.failed.Load()
-		successRate := float64(successful) / (float64(successful) + float64(failed))
 
-		var title string
-		if next {
-			title = "current progress"
+		var successRate string
+		if n := successful + failed; n == 0 {
+			successRate = "N/A"
 		} else {
-			title = "final progress"
+			successRate = fmt.Sprintf("%.2f", float64(successful)/float64(n))
 		}
-		r.logger.Printf("[INFO] %v: tapePosition=%v qps=%v concurrency=%v successful=%v failed=%v successRate=%.2f",
+
+		r.logger.Printf("[INFO] %v: tapePosition=%v qps=%v concurrency=%v successful=%v failed=%v successRate=%v",
 			title, tapePosition, qps, concurrency, successful, failed, successRate)
 	}
 }
