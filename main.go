@@ -40,7 +40,7 @@ const (
 	tapePositionFileExt   = ".httpreplay-pos"
 	failureTapeFileExt    = ".httpreplay-failure"
 	failureTapeBufferSize = 16 * 1024 * 1024
-	syncWritesInterval    = 500 * time.Millisecond
+	flushToDiskInterval   = 500 * time.Millisecond
 )
 
 var (
@@ -266,7 +266,7 @@ func (r *httpRequester) start() {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		r.syncWritesPeriodically()
+		r.flushToDiskPeriodically()
 	}()
 
 	r.wg.Add(1)
@@ -318,7 +318,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 		close(r.idleness)
 
 		if noMoreHttpRequests {
-			r.logger.Printf("[INFO] no more http requests")
+			r.logger.Print("[INFO] no more http requests")
 		}
 	}()
 
@@ -347,7 +347,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 	}
 
-	r.logger.Println("===== Feel free to stop the program with CTRL+C; progress will be saved. =====")
+	r.logger.Print("===== Feel free to stop the program with CTRL+C; progress will be saved. =====")
 
 	var numberOfHttpRequests int
 	for tapePosition, line := range r.readTape() {
@@ -372,7 +372,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 
 		numberOfHttpRequests++
 		if r.maxNumberOfHttpRequests >= 0 && numberOfHttpRequests > r.maxNumberOfHttpRequests {
-			r.logger.Println("[INFO] reached max number of http requests")
+			r.logger.Print("[INFO] reached max number of http requests")
 			return
 		}
 
@@ -600,9 +600,9 @@ func (r *httpRequester) buildHttpRequest(curlCommand curlCommand) (*http.Request
 	}
 	if r.debug {
 		if rawBody == nil {
-			r.logger.Printf("[DEBUG] http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
+			r.logger.Printf("[DEBUG] http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL, httpRequest.Header)
 		} else {
-			r.logger.Printf("[DEBUG] http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, rawBody.Bytes())
+			r.logger.Printf("[DEBUG] http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL, httpRequest.Header, rawBody.Bytes())
 		}
 	}
 	return httpRequest, nil
@@ -661,8 +661,8 @@ func (r *httpRequester) recordFailedHttpRequest(line string) {
 	}
 }
 
-func (r *httpRequester) syncWritesPeriodically() {
-	ticker := time.NewTicker(syncWritesInterval)
+func (r *httpRequester) flushToDiskPeriodically() {
+	ticker := time.NewTicker(flushToDiskInterval)
 	defer ticker.Stop()
 
 	for next := true; next; {
@@ -675,7 +675,7 @@ func (r *httpRequester) syncWritesPeriodically() {
 		{
 			err := r.tapePositionTracker.Flush()
 			if err != nil {
-				r.logger.Printf("[WARN] failed to sync writes to tape position: %v", err)
+				r.logger.Printf("[WARN] failed to flush tape position to disk: %v", err)
 			}
 		}
 
@@ -686,15 +686,9 @@ func (r *httpRequester) syncWritesPeriodically() {
 			r.failureTapeLock.Unlock()
 			err := errors.Join(err1, err2)
 			if err != nil {
-				r.logger.Printf("[WARN] failed to sync writes failure tape: %v", err)
+				r.logger.Printf("[WARN] failed to flush failure tape to disk: %v", err)
 			}
 		}
-	}
-
-	r.logger.Println("[INFO] writes synced to tape position")
-
-	if n := r.stats.failed.Load(); n >= 1 {
-		r.logger.Printf("[INFO] writes synced to failure tape; failedHttpRequestCount=%v", n)
 	}
 }
 
