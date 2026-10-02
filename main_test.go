@@ -35,7 +35,9 @@ type request struct {
 	Body   string
 }
 
-func TestNormal(t *testing.T) {
+func TestGeneral(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	var server *httptest.Server
@@ -76,6 +78,15 @@ func TestNormal(t *testing.T) {
 %[1]s/api?v=3 -H'X-Foo: Bar' --request POST --data='{"key": "value"}' --header 'X-Hello: World' --header='Content-Type: application/json'
 %[1]s/api?v=4 -d 'foo=bar'
 %[1]s/api?v=5 -d 'foo=bar' -d 'key=val' -H 'Host: example.com' -H 'User-Agent: Test'
+
+ # invalid requests
+%[1]s/api?v=7 --unsupported-flag
+%[1]s/api?v=8 -H
+%[1]s/api?v=9 -d 'foo
+%[1]s/api?v=10 -X "\n"
+%[1]s/api?v=11 -H ':::'
+-X GET
+''
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
@@ -94,7 +105,7 @@ func TestNormal(t *testing.T) {
 		true,
 	)
 
-	require.Regexp(t, "final progress:.* tapePosition=6", out.String())
+	require.Regexp(t, "final progress:.* tapePosition=15", out.String())
 	require.Regexp(t, "final progress:.* successful=6", out.String())
 	require.Regexp(t, "final progress:.* failed=0", out.String())
 
@@ -167,6 +178,8 @@ func TestNormal(t *testing.T) {
 }
 
 func TestFollowRedirects(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	var server *httptest.Server
@@ -243,6 +256,8 @@ func TestFollowRedirects(t *testing.T) {
 }
 
 func TestDryRun(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +322,8 @@ func TestDryRun(t *testing.T) {
 }
 
 func TestProgressResumption(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -449,6 +466,8 @@ func TestProgressResumption(t *testing.T) {
 }
 
 func TestFailureTape(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -525,6 +544,8 @@ func TestFailureTape(t *testing.T) {
 }
 
 func TestMaxNumberOfHttpRequests(t *testing.T) {
+	t.Parallel()
+
 	var requestsLock sync.Mutex
 	var requests []request
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -579,6 +600,8 @@ func TestMaxNumberOfHttpRequests(t *testing.T) {
 }
 
 func TestBadArgs(t *testing.T) {
+	t.Parallel()
+
 	out := bytes.NewBuffer(nil)
 	defer func() { t.Log(out.String()) }()
 
@@ -600,6 +623,8 @@ func TestBadArgs(t *testing.T) {
 }
 
 func TestEmptyTapeFile(t *testing.T) {
+	t.Parallel()
+
 	tempDirPath := t.TempDir()
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, nil, 0644)
@@ -626,6 +651,8 @@ func TestEmptyTapeFile(t *testing.T) {
 }
 
 func TestLargeTapeFile(t *testing.T) {
+	t.Parallel()
+
 	var requestCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
@@ -670,6 +697,8 @@ func TestLargeTapeFile(t *testing.T) {
 }
 
 func TestDeliveryAtLeastOnce(t *testing.T) {
+	t.Parallel()
+
 	var requestCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.RequestURI, "k=51") {
@@ -723,6 +752,8 @@ func TestDeliveryAtLeastOnce(t *testing.T) {
 }
 
 func TestDeliveryAtMostOnce(t *testing.T) {
+	t.Parallel()
+
 	var requestCount atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.RequestURI, "k=51") {

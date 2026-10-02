@@ -322,17 +322,8 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 	}()
 
-	acquireQpsToken := func() bool { return true }
-	if r.qpsLimit >= 1 {
-		limiter := ratelimit.New(r.qpsLimit)
-		acquireQpsToken = func() bool {
-			if r.backgroundCtx.Err() != nil {
-				return false
-			}
-			limiter.Take()
-			return true
-		}
-	}
+	parser := shellwords.NewParser()
+	parser.ParseComment = true
 
 	acquireConcurrencyToken := func() (func(), bool) { return func() {}, true }
 	if r.concurrencyLimit >= 1 {
@@ -347,45 +338,62 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 	}
 
+	acquireQpsToken := func() bool { return true }
+	if r.qpsLimit >= 1 {
+		limiter := ratelimit.New(r.qpsLimit)
+		acquireQpsToken = func() bool {
+			if r.backgroundCtx.Err() != nil {
+				return false
+			}
+			limiter.Take()
+			return true
+		}
+	}
+
 	r.logger.Print("===== Feel free to stop the program with CTRL+C; progress will be saved. =====")
 
 	var numberOfHttpRequests int
 	for tapePosition, line := range r.readTape() {
-		curlCommand, err := parseCurlCommand(line)
+		args, err := parser.Parse(line)
 		if err != nil {
 			r.tapePositionTracker.CommitTapePosition(tapePosition)
-			r.logger.Printf("[WARN] failed to parse curl command from line %q: %v", line, err)
+			r.logger.Printf("[WARN] failed to parse args; tapePosition=%v: %v", tapePosition, err)
 			continue
 		}
-		if curlCommand.IsEmpty() {
-			// ignore empty curl command
+		if len(args) == 0 {
 			r.tapePositionTracker.CommitTapePosition(tapePosition)
+			continue
+		}
+
+		curlCommand, err := parseCurlCommand(args)
+		if err != nil {
+			r.tapePositionTracker.CommitTapePosition(tapePosition)
+			r.logger.Printf("[WARN] failed to parse curl command; tapePosition=%v: %v", tapePosition, err)
 			continue
 		}
 
 		httpRequest, err := r.buildHttpRequest(curlCommand)
 		if err != nil {
 			r.tapePositionTracker.CommitTapePosition(tapePosition)
-			r.logger.Printf("[WARN] failed to build http request: %v", err)
+			r.logger.Printf("[WARN] failed to build http request; tapePosition=%v: %v", tapePosition, err)
 			continue
 		}
 
 		numberOfHttpRequests++
 		if r.maxNumberOfHttpRequests >= 0 && numberOfHttpRequests > r.maxNumberOfHttpRequests {
 			r.logger.Print("[INFO] reached max number of http requests")
-			return
-		}
-
-		ok := acquireQpsToken()
-		if !ok {
-			// exit
-			return
+			return // exit
 		}
 
 		releaseConcurrencyToken, ok := acquireConcurrencyToken()
 		if !ok {
-			// exit
-			return
+			return // exit
+		}
+
+		ok = acquireQpsToken()
+		if !ok {
+			releaseConcurrencyToken()
+			return // exit
 		}
 
 		if r.deliverySemantics == deliveryAtMostOnce {
@@ -400,6 +408,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 			}()
 
 			r.doHttpRequest(httpRequest, line)
+
 			if r.deliverySemantics == deliveryAtLeastOnce {
 				r.tapePositionTracker.CommitTapePosition(tapePosition)
 			}
@@ -435,21 +444,7 @@ type curlCommand struct {
 	Data    *bytes.Buffer
 }
 
-var parser = func() *shellwords.Parser {
-	parser := shellwords.NewParser()
-	parser.ParseComment = true
-	return parser
-}()
-
-func parseCurlCommand(line string) (curlCommand, error) {
-	args, err := parser.Parse(line)
-	if err != nil {
-		return curlCommand{}, fmt.Errorf("parse line: %w", err)
-	}
-	if len(args) == 0 {
-		return curlCommand{}, nil
-	}
-
+func parseCurlCommand(args []string) (curlCommand, error) {
 	var (
 		curlCommand1           curlCommand
 		contentTypeHeaderIsSet bool
@@ -545,8 +540,6 @@ func parseCurlCommand(line string) (curlCommand, error) {
 	}
 	return curlCommand1, nil
 }
-
-func (c *curlCommand) IsEmpty() bool { return c.URL == "" }
 
 func getFlagValue(arg, flagName, longFlagName string, popNextArg func() (string, bool)) (string, error, bool) {
 	longFlagMode := false
@@ -673,13 +666,6 @@ func (r *httpRequester) flushToDiskPeriodically() {
 		}
 
 		{
-			err := r.tapePositionTracker.Flush()
-			if err != nil {
-				r.logger.Printf("[WARN] failed to flush tape position to disk: %v", err)
-			}
-		}
-
-		{
 			r.failureTapeLock.Lock()
 			err1 := r.failureTape.Flush()
 			err2 := r.failureTapeFile.Sync()
@@ -687,6 +673,13 @@ func (r *httpRequester) flushToDiskPeriodically() {
 			err := errors.Join(err1, err2)
 			if err != nil {
 				r.logger.Printf("[WARN] failed to flush failure tape to disk: %v", err)
+			}
+		}
+
+		{
+			err := r.tapePositionTracker.Flush()
+			if err != nil {
+				r.logger.Printf("[WARN] failed to flush tape position to disk: %v", err)
 			}
 		}
 	}
