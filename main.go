@@ -853,18 +853,17 @@ func (t *tapePositionTracker) CommitTapePosition(tapePosition int64) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 
-	if atomic.CompareAndSwapInt64(t.tapePosition, tapePosition-1, tapePosition) {
-		for {
-			tapePosition++
-
-			n := len(t.pendingTapePositions)
-			delete(t.pendingTapePositions, tapePosition)
-			if len(t.pendingTapePositions) == n {
-				return
+	if tapePosition == *t.tapePosition+1 {
+		for n := len(t.pendingTapePositions); n >= 1; {
+			delete(t.pendingTapePositions, tapePosition+1)
+			nn := len(t.pendingTapePositions)
+			if nn == n {
+				break
 			}
-
-			atomic.StoreInt64(t.tapePosition, tapePosition)
+			tapePosition++
+			n = nn
 		}
+		atomic.StoreInt64(t.tapePosition, tapePosition)
 	} else {
 		t.pendingTapePositions[tapePosition] = struct{}{}
 	}
