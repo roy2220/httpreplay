@@ -356,25 +356,25 @@ func (r *httpRequester) dispatchHttpRequests() {
 	for tapePosition, line := range r.readTape() {
 		args, err := parser.Parse(line)
 		if err != nil {
-			r.tapePositionTracker.CommitTapePosition(tapePosition)
+			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to parse args; tapePosition=%v: %v", tapePosition, err)
 			continue
 		}
 		if len(args) == 0 {
-			r.tapePositionTracker.CommitTapePosition(tapePosition)
+			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			continue
 		}
 
 		curlCommand, err := parseCurlCommand(args)
 		if err != nil {
-			r.tapePositionTracker.CommitTapePosition(tapePosition)
+			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to parse curl command; tapePosition=%v: %v", tapePosition, err)
 			continue
 		}
 
 		httpRequest, err := r.buildHttpRequest(curlCommand)
 		if err != nil {
-			r.tapePositionTracker.CommitTapePosition(tapePosition)
+			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			r.logger.Printf("[WARN] failed to build http request; tapePosition=%v: %v", tapePosition, err)
 			continue
 		}
@@ -397,7 +397,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 
 		if r.deliverySemantics == deliveryAtMostOnce {
-			r.tapePositionTracker.CommitTapePosition(tapePosition)
+			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 		}
 
 		wg.Add(1)
@@ -410,7 +410,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 			r.doHttpRequest(httpRequest, line)
 
 			if r.deliverySemantics == deliveryAtLeastOnce {
-				r.tapePositionTracker.CommitTapePosition(tapePosition)
+				r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			}
 		}()
 	}
@@ -842,7 +842,7 @@ func (t *tapePositionTracker) Close() error {
 
 func (t *tapePositionTracker) TapePosition() int64 { return atomic.LoadInt64(t.tapePosition) }
 
-func (t *tapePositionTracker) CommitTapePosition(tapePosition int64) {
+func (t *tapePositionTracker) SubmitTapePosition(tapePosition int64) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 
