@@ -9,6 +9,7 @@ import (
 	"io"
 	"iter"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/textproto"
@@ -28,19 +29,12 @@ import (
 	"go.uber.org/ratelimit"
 )
 
-func main() {
-	exitSignal := make(chan os.Signal, 1)
-	signal.Notify(exitSignal, syscall.SIGINT, syscall.SIGTERM)
-	debug := os.Getenv("DEBUG") == "1"
-
-	Main(os.Args[1:], os.Stdout, os.Exit, exitSignal, debug)
-}
-
 const (
-	tapePositionFileExt   = ".httpreplay-pos"
-	failureTapeFileExt    = ".httpreplay-failure"
-	failureTapeBufferSize = 16 * 1024 * 1024
-	flushToDiskInterval   = 500 * time.Millisecond
+	tapePositionFileExt      = ".httpreplay-pos"
+	failureTapeFileExt       = ".httpreplay-failure"
+	dryRunFileExt            = ".dry-run"
+	minFailureTapeBufferSize = 4 * 1024
+	minSyncToDiskInterval    = 10 * time.Millisecond
 )
 
 var (
@@ -58,70 +52,25 @@ func init() {
 	defaultUserAgent = []string{"httpreplay/" + strings.TrimPrefix(version, "v")}
 }
 
-type args struct {
-	TapeFileName            string `arg:"required,positional" placeholder:"TAPE-FILE" help:"path to the tape file containing HTTP requests"`
-	MaxNumberOfHttpRequests int    `arg:"-n,--" placeholder:"NUM" help:"stop after NUM requests, no limit if less than 0" default:"-1"`
-	QpsLimit                int    `arg:"-q,--" placeholder:"QPS" help:"maximum QPS, no limit if less than 1" default:"1"`
-	ConcurrencyLimit        int    `arg:"-c,--" placeholder:"CONCURRENCY" help:"maximum concurrency, no limit if less than 1" default:"1"`
-	Timeout                 int    `arg:"-t,--" placeholder:"TIMEOUT" help:"request timeout in seconds, no timeout if less than 1" default:"10"`
-	FollowRedirects         bool   `arg:"-f,--" help:"follow HTTP redirects" default:"false"`
-	DryRun                  bool   `arg:"-d,--" help:"dry-run mode" default:"false"`
-	DeliverySemantics       string `arg:"--,--delivery-semantics" placeholder:"SEMANTICS" help:"delivery semantics for resuming after a crash (one of at-least-once, at-most-once)" default:"at-least-once"`
+func main() {
+	debug := os.Getenv("DEBUG") == "1"
+	exitSignal := make(chan os.Signal, 1)
+	signal.Notify(exitSignal, syscall.SIGINT, syscall.SIGTERM)
+
+	Main(os.Args[1:], os.Stdout, debug, os.Exit, exitSignal)
 }
-
-func (args) Version() string { return "httpreplay " + version }
-
-type deliverySemantics int
-
-const (
-	deliveryAtLeastOnce deliverySemantics = iota
-	deliveryAtMostOnce
-)
 
 // Main is the entry point of the program.
 func Main(
 	rawArgs []string,
-	out io.Writer,
+	output io.Writer,
+	debug bool,
 	exit func(int),
 	exitSignal <-chan os.Signal,
-	debug bool,
 ) {
-	var args args
-	var deliverySemantics deliverySemantics
-	{
-		parser, err := arg.NewParser(arg.Config{Exit: exit, Out: out}, &args)
-		if err != nil {
-			fmt.Fprintln(out, err)
-			exit(1)
-		}
-		parser.MustParse(rawArgs)
-		switch args.DeliverySemantics {
-		case "at-least-once":
-			deliverySemantics = deliveryAtLeastOnce
-		case "at-most-once":
-			deliverySemantics = deliveryAtMostOnce
-		default:
-			parser.Fail("delivery semantics should be one of at-least-once or at-most-once")
-		}
-		if args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
-			parser.Fail("should limit at least one of qps or concurrency")
-		}
-	}
+	logger := log.New(output, "", log.LstdFlags)
 
-	logger := log.New(out, "", log.LstdFlags)
-
-	httpRequester, err := newHttpRequester(
-		args.TapeFileName,
-		args.MaxNumberOfHttpRequests,
-		args.QpsLimit,
-		args.ConcurrencyLimit,
-		time.Duration(args.Timeout)*time.Second,
-		args.FollowRedirects,
-		args.DryRun,
-		deliverySemantics,
-		debug,
-		logger,
-	)
+	httpRequester, err := newHttpRequester(mustParseHttpRequesterConfig(rawArgs, output, logger, debug, exit))
 	if err != nil {
 		logger.Printf("[FATAL] failed to create http requester: %v", err)
 		exit(1)
@@ -136,19 +85,14 @@ func Main(
 }
 
 type httpRequester struct {
-	tapeReader              *tapeReader
-	tapePositionTracker     *tapePositionTracker
-	failureTapeFile         *os.File
-	failureTapeLock         sync.Mutex
-	failureTape             *bufio.Writer
-	maxNumberOfHttpRequests int
-	qpsLimit                int
-	concurrencyLimit        int
-	httpClient              *http.Client
-	dryRun                  bool
-	deliverySemantics       deliverySemantics
-	debug                   bool
-	logger                  *log.Logger
+	config httpRequesterConfig
+
+	tapeReader          *tapeReader
+	tapePositionTracker *tapePositionTracker
+	failureTapeFile     *os.File
+	failureTapeLock     sync.Mutex
+	failureTape         *bufio.Writer
+	httpClient          *http.Client
 
 	backgroundCtx context.Context
 	cancel        context.CancelFunc
@@ -163,18 +107,97 @@ type httpRequester struct {
 	}
 }
 
-func newHttpRequester(
-	tapeFileName string,
-	maxNumberOfHttpRequests int,
-	qpsLimit, concurrencyLimit int,
-	timeout time.Duration,
-	followRedirects bool,
-	dryRun bool,
-	deliverySemantics deliverySemantics,
-	debug bool,
+type httpRequesterConfig struct {
+	TapeFileName            string
+	MaxNumberOfHttpRequests int
+	QpsLimit                int
+	ConcurrencyLimit        int
+	RequestTimeout          time.Duration
+	FollowRedirects         bool
+	DryRun                  bool
+	DeliverySemantics       deliverySemantics
+	FailureTapeBufferSize   int
+	SyncToDiskInterval      time.Duration
+	Logger                  *log.Logger
+	Debug                   bool
+}
+
+type deliverySemantics int
+
+const (
+	deliveryAtLeastOnce deliverySemantics = iota
+	deliveryAtMostOnce
+)
+
+type args struct {
+	TapeFileName            string  `arg:"required,positional" placeholder:"TAPE-FILE" help:"path to the tape file containing HTTP requests"`
+	MaxNumberOfHttpRequests int     `arg:"-n,--" placeholder:"NUM" help:"stop after NUM requests, no limit if less than 0" default:"-1"`
+	QpsLimit                int     `arg:"-q,--" placeholder:"QPS" help:"maximum QPS, no limit if less than 1" default:"1"`
+	ConcurrencyLimit        int     `arg:"-c,--" placeholder:"CONCURRENCY" help:"maximum concurrency, no limit if less than 1" default:"1"`
+	RequestTimeout          float64 `arg:"-t,--" placeholder:"SECONDS" help:"request timeout in seconds (float), no timeout if less than or equal to 0.0" default:"10.0"`
+	FollowRedirects         bool    `arg:"-f,--" help:"follow HTTP redirects" default:"false"`
+	DryRun                  bool    `arg:"-d,--" help:"dry-run mode" default:"false"`
+	DeliverySemantics       string  `arg:"--,--delivery-semantics" placeholder:"SEMANTICS" help:"delivery semantics for resuming after a crash (one of at-least-once, at-most-once)" default:"at-least-once"`
+	FailureTapeBufferSize   int     `arg:"--,--failure-tape-buffer-size" placeholder:"BYTES" help:"buffer size of the failure tape file, in bytes; values too small will be raised" default:"16777216"`
+	SyncToDiskInterval      float64 `arg:"--,--sync-to-disk-interval" placeholder:"SECONDS" help:"interval in seconds (float) for syncing the failure tape and position file to disk; values too small will be raised" default:"0.5"`
+}
+
+func (args) Version() string { return "httpreplay " + version }
+
+func mustParseHttpRequesterConfig(
+	rawArgs []string,
+	output io.Writer,
 	logger *log.Logger,
-) (_ *httpRequester, returnedErr error) {
-	tapeReader, err := newTapeReader(tapeFileName)
+	debug bool,
+	exit func(int),
+) httpRequesterConfig {
+	var args args
+	var deliverySemantics deliverySemantics
+	{
+		parser, err := arg.NewParser(arg.Config{Exit: exit, Out: output}, &args)
+		if err != nil {
+			fmt.Fprintln(output, err)
+			exit(1)
+		}
+		parser.MustParse(rawArgs)
+
+		if args.QpsLimit < 1 && args.ConcurrencyLimit < 1 {
+			parser.Fail("should limit at least one of qps or concurrency")
+		}
+		if math.IsNaN(args.RequestTimeout) {
+			parser.Fail("request timeout should not be NaN")
+		}
+		switch args.DeliverySemantics {
+		case "at-least-once":
+			deliverySemantics = deliveryAtLeastOnce
+		case "at-most-once":
+			deliverySemantics = deliveryAtMostOnce
+		default:
+			parser.Fail("delivery semantics should be one of at-least-once or at-most-once")
+		}
+		if math.IsNaN(args.SyncToDiskInterval) {
+			parser.Fail("sync to disk interval should not be NaN")
+		}
+	}
+
+	return httpRequesterConfig{
+		TapeFileName:            args.TapeFileName,
+		MaxNumberOfHttpRequests: args.MaxNumberOfHttpRequests,
+		QpsLimit:                args.QpsLimit,
+		ConcurrencyLimit:        args.ConcurrencyLimit,
+		RequestTimeout:          max(time.Duration(args.RequestTimeout*float64(time.Second)), 0),
+		FollowRedirects:         args.FollowRedirects,
+		DryRun:                  args.DryRun,
+		FailureTapeBufferSize:   max(args.FailureTapeBufferSize, minFailureTapeBufferSize),
+		SyncToDiskInterval:      max(time.Duration(args.SyncToDiskInterval*float64(time.Second)), minSyncToDiskInterval),
+		DeliverySemantics:       deliverySemantics,
+		Logger:                  logger,
+		Debug:                   debug,
+	}
+}
+
+func newHttpRequester(config httpRequesterConfig) (_ *httpRequester, returnedErr error) {
+	tapeReader, err := newTapeReader(config.TapeFileName)
 	if err != nil {
 		return nil, fmt.Errorf("create tape reader: %w", err)
 	}
@@ -183,9 +206,9 @@ func newHttpRequester(
 			tapeReader.Close()
 		}
 	}()
-	tapePositionFileName := tapeFileName + tapePositionFileExt
-	if dryRun {
-		tapePositionFileName += ".dry-run"
+	tapePositionFileName := config.TapeFileName + tapePositionFileExt
+	if config.DryRun {
+		tapePositionFileName += dryRunFileExt
 	}
 	tapePositionTracker, err := newTapePositionTracker(tapePositionFileName)
 	if err != nil {
@@ -196,7 +219,7 @@ func newHttpRequester(
 			tapePositionTracker.Close()
 		}
 	}()
-	failureTapeFileName := tapeFileName + failureTapeFileExt
+	failureTapeFileName := config.TapeFileName + failureTapeFileExt
 	failureTapeFile, err := os.OpenFile(failureTapeFileName, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open failure tape file: %w", err)
@@ -213,42 +236,34 @@ func newHttpRequester(
 			}
 		}
 	}()
-	if timeout < 0 {
-		timeout = 0
-	}
 	httpClient := http.Client{
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
-				Timeout:   timeout,
+				Timeout:   config.RequestTimeout,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          10000,
-			MaxIdleConnsPerHost:   max(10, concurrencyLimit),
+			MaxIdleConnsPerHost:   max(10, config.ConcurrencyLimit),
 			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   timeout,
+			TLSHandshakeTimeout:   config.RequestTimeout,
 			ExpectContinueTimeout: 1 * time.Second,
 		},
 
-		Timeout: timeout,
+		Timeout: config.RequestTimeout,
 	}
-	if !followRedirects {
+	if !config.FollowRedirects {
 		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	}
 	r := &httpRequester{
-		tapeReader:              tapeReader,
-		tapePositionTracker:     tapePositionTracker,
-		failureTapeFile:         failureTapeFile,
-		failureTape:             bufio.NewWriterSize(failureTapeFile, failureTapeBufferSize),
-		maxNumberOfHttpRequests: maxNumberOfHttpRequests,
-		qpsLimit:                qpsLimit,
-		concurrencyLimit:        concurrencyLimit,
-		httpClient:              &httpClient,
-		dryRun:                  dryRun,
-		deliverySemantics:       deliverySemantics,
-		debug:                   debug,
-		logger:                  logger,
-		idleness:                make(chan struct{}),
+		config: config,
+
+		tapeReader:          tapeReader,
+		tapePositionTracker: tapePositionTracker,
+		failureTapeFile:     failureTapeFile,
+		failureTape:         bufio.NewWriterSize(failureTapeFile, config.FailureTapeBufferSize),
+		httpClient:          &httpClient,
+		idleness:            make(chan struct{}),
 	}
 	r.start()
 	return r, nil
@@ -266,7 +281,7 @@ func (r *httpRequester) start() {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
-		r.flushToDiskPeriodically()
+		r.syncToDiskPeriodically()
 	}()
 
 	r.wg.Add(1)
@@ -281,12 +296,12 @@ func (r *httpRequester) Close() {
 
 	err := r.tapeReader.Close()
 	if err != nil {
-		r.logger.Printf("[WARN] failed to close tape reader: %v", err)
+		r.config.Logger.Printf("[WARN] failed to close tape reader: %v", err)
 	}
 
 	err = r.tapePositionTracker.Close()
 	if err != nil {
-		r.logger.Printf("[WARN] failed to close tape position tracker: %v", err)
+		r.config.Logger.Printf("[WARN] failed to close tape position tracker: %v", err)
 	}
 
 	var failureTapeFileIsEmpty bool
@@ -295,12 +310,12 @@ func (r *httpRequester) Close() {
 	}
 	err = r.failureTapeFile.Close()
 	if err != nil {
-		r.logger.Printf("[WARN] failed to close failure tape file: %v", err)
+		r.config.Logger.Printf("[WARN] failed to close failure tape file: %v", err)
 	}
 	if failureTapeFileIsEmpty {
 		err = os.Remove(r.failureTapeFile.Name())
 		if err != nil {
-			r.logger.Printf("[WARN] failed to remove empty failure tape file: %v", err)
+			r.config.Logger.Printf("[WARN] failed to remove empty failure tape file: %v", err)
 		}
 	}
 }
@@ -318,7 +333,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 		close(r.idleness)
 
 		if noMoreHttpRequests {
-			r.logger.Print("[INFO] no more http requests")
+			r.config.Logger.Print("[INFO] no more http requests")
 		}
 	}()
 
@@ -326,8 +341,8 @@ func (r *httpRequester) dispatchHttpRequests() {
 	parser.ParseComment = true
 
 	acquireConcurrencyToken := func() (func(), bool) { return func() {}, true }
-	if r.concurrencyLimit >= 1 {
-		concurrencyTokens := make(chan struct{}, r.concurrencyLimit)
+	if r.config.ConcurrencyLimit >= 1 {
+		concurrencyTokens := make(chan struct{}, r.config.ConcurrencyLimit)
 		acquireConcurrencyToken = func() (func(), bool) {
 			select {
 			case <-r.backgroundCtx.Done():
@@ -339,8 +354,8 @@ func (r *httpRequester) dispatchHttpRequests() {
 	}
 
 	acquireQpsToken := func() bool { return true }
-	if r.qpsLimit >= 1 {
-		limiter := ratelimit.New(r.qpsLimit)
+	if r.config.QpsLimit >= 1 {
+		limiter := ratelimit.New(r.config.QpsLimit)
 		acquireQpsToken = func() bool {
 			if r.backgroundCtx.Err() != nil {
 				return false
@@ -350,14 +365,14 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 	}
 
-	r.logger.Print("===== Feel free to stop the program with CTRL+C; progress will be saved. =====")
+	r.config.Logger.Print("===== Feel free to stop the program with CTRL+C; progress will be saved. =====")
 
 	var numberOfHttpRequests int
 	for tapePosition, line := range r.readTape() {
 		args, err := parser.Parse(line)
 		if err != nil {
 			r.tapePositionTracker.SubmitTapePosition(tapePosition)
-			r.logger.Printf("[WARN] failed to parse args; tapePosition=%v: %v", tapePosition, err)
+			r.config.Logger.Printf("[WARN] failed to parse args; tapePosition=%v: %v", tapePosition, err)
 			continue
 		}
 		if len(args) == 0 {
@@ -368,20 +383,20 @@ func (r *httpRequester) dispatchHttpRequests() {
 		curlCommand, err := parseCurlCommand(args)
 		if err != nil {
 			r.tapePositionTracker.SubmitTapePosition(tapePosition)
-			r.logger.Printf("[WARN] failed to parse curl command; tapePosition=%v: %v", tapePosition, err)
+			r.config.Logger.Printf("[WARN] failed to parse curl command; tapePosition=%v: %v", tapePosition, err)
 			continue
 		}
 
 		httpRequest, err := r.buildHttpRequest(curlCommand)
 		if err != nil {
 			r.tapePositionTracker.SubmitTapePosition(tapePosition)
-			r.logger.Printf("[WARN] failed to build http request; tapePosition=%v: %v", tapePosition, err)
+			r.config.Logger.Printf("[WARN] failed to build http request; tapePosition=%v: %v", tapePosition, err)
 			continue
 		}
 
 		numberOfHttpRequests++
-		if r.maxNumberOfHttpRequests >= 0 && numberOfHttpRequests > r.maxNumberOfHttpRequests {
-			r.logger.Print("[INFO] reached max number of http requests")
+		if r.config.MaxNumberOfHttpRequests >= 0 && numberOfHttpRequests > r.config.MaxNumberOfHttpRequests {
+			r.config.Logger.Print("[INFO] reached max number of http requests")
 			return // exit
 		}
 
@@ -396,7 +411,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 			return // exit
 		}
 
-		if r.deliverySemantics == deliveryAtMostOnce {
+		if r.config.DeliverySemantics == deliveryAtMostOnce {
 			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 		}
 
@@ -409,7 +424,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 
 			r.doHttpRequest(httpRequest, line)
 
-			if r.deliverySemantics == deliveryAtLeastOnce {
+			if r.config.DeliverySemantics == deliveryAtLeastOnce {
 				r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			}
 		}()
@@ -591,11 +606,11 @@ func (r *httpRequester) buildHttpRequest(curlCommand curlCommand) (*http.Request
 	if len(httpRequest.Header["User-Agent"]) == 0 {
 		httpRequest.Header["User-Agent"] = defaultUserAgent
 	}
-	if r.debug {
+	if r.config.Debug {
 		if rawBody == nil {
-			r.logger.Printf("[DEBUG] http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL, httpRequest.Header)
+			r.config.Logger.Printf("[DEBUG] http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL, httpRequest.Header)
 		} else {
-			r.logger.Printf("[DEBUG] http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL, httpRequest.Header, rawBody.Bytes())
+			r.config.Logger.Printf("[DEBUG] http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL, httpRequest.Header, rawBody.Bytes())
 		}
 	}
 	return httpRequest, nil
@@ -606,13 +621,13 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 	defer r.stats.concurrency.Add(-1)
 
 	r.stats.total.Add(1)
-	if r.dryRun {
+	if r.config.DryRun {
 		if httpRequest.Body == nil {
-			r.logger.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
+			r.config.Logger.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
 		} else {
 			data, _ := io.ReadAll(httpRequest.Body)
 			rawBody := string(data)
-			r.logger.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, rawBody)
+			r.config.Logger.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q body=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header, rawBody)
 		}
 		r.stats.successful.Add(1)
 		return
@@ -620,8 +635,8 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 
 	resp, err := r.httpClient.Do(httpRequest)
 	if err != nil {
-		if r.debug {
-			r.logger.Printf("[DEBUG] failed to do http request: %v", err)
+		if r.config.Debug {
+			r.config.Logger.Printf("[DEBUG] failed to do http request: %v", err)
 		}
 		r.stats.failed.Add(1)
 		line = fmt.Sprintf("%v  # ERROR: %v", line, strings.ReplaceAll(err.Error(), "\n", ""))
@@ -631,8 +646,8 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if n := resp.StatusCode / 100; !(n >= 2 && n <= 3) {
-		if r.debug {
-			r.logger.Printf("[DEBUG] %v %q responded exception status code: %v", httpRequest.Method, httpRequest.URL.String(), resp.StatusCode)
+		if r.config.Debug {
+			r.config.Logger.Printf("[DEBUG] %v %q responded exception status code: %v", httpRequest.Method, httpRequest.URL.String(), resp.StatusCode)
 		}
 		r.stats.failed.Add(1)
 		line = fmt.Sprintf("%v  # STATUS CODE: %v", line, resp.StatusCode)
@@ -650,12 +665,12 @@ func (r *httpRequester) recordFailedHttpRequest(line string) {
 
 	err := errors.Join(err1, err2)
 	if err != nil {
-		r.logger.Printf("[WARN] failed to write failure tape file: %v", err)
+		r.config.Logger.Printf("[WARN] failed to write failure tape file: %v", err)
 	}
 }
 
-func (r *httpRequester) flushToDiskPeriodically() {
-	ticker := time.NewTicker(flushToDiskInterval)
+func (r *httpRequester) syncToDiskPeriodically() {
+	ticker := time.NewTicker(r.config.SyncToDiskInterval)
 	defer ticker.Stop()
 
 	for next := true; next; {
@@ -672,14 +687,14 @@ func (r *httpRequester) flushToDiskPeriodically() {
 			r.failureTapeLock.Unlock()
 			err := errors.Join(err1, err2)
 			if err != nil {
-				r.logger.Printf("[WARN] failed to flush failure tape to disk: %v", err)
+				r.config.Logger.Printf("[WARN] failed to sync failure tape to disk: %v", err)
 			}
 		}
 
 		{
-			err := r.tapePositionTracker.Flush()
+			err := r.tapePositionTracker.Sync()
 			if err != nil {
-				r.logger.Printf("[WARN] failed to flush tape position to disk: %v", err)
+				r.config.Logger.Printf("[WARN] failed to sync tape position to disk: %v", err)
 			}
 		}
 	}
@@ -719,7 +734,7 @@ func (r *httpRequester) logProgress() {
 			successRate = fmt.Sprintf("%.2f", float64(successful)/float64(n))
 		}
 
-		r.logger.Printf("[INFO] %v: tapePosition=%v qps=%v concurrency=%v successful=%v failed=%v successRate=%v",
+		r.config.Logger.Printf("[INFO] %v: tapePosition=%v qps=%v concurrency=%v successful=%v failed=%v successRate=%v",
 			title, tapePosition, qps, concurrency, successful, failed, successRate)
 	}
 }
@@ -862,6 +877,6 @@ func (t *tapePositionTracker) SubmitTapePosition(tapePosition int64) {
 	}
 }
 
-func (t *tapePositionTracker) Flush() error { return t.mMap.Flush() }
+func (t *tapePositionTracker) Sync() error { return t.mMap.Flush() }
 
 func b2s(b []byte) string { return unsafe.String(unsafe.SliceData(b), len(b)) }

@@ -41,7 +41,7 @@ GOBIN=${PWD} CGO_ENABLED=0 go install github.com/roy2220/httpreplay@latest
 Run `httpreplay` with the required tape file and optional flags:
 
 ```bash
-httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d] [--delivery-semantics SEMANTICS]
+httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t SECONDS] [-f] [-d] [--delivery-semantics SEMANTICS] [--failure-tape-buffer-size BYTES] [--sync-to-disk-interval SECONDS]
 ````
 
 ### Arguments
@@ -52,10 +52,12 @@ httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t TIMEOUT] [-f] [-d] [
 | **-n NUM** | Stop after `NUM` requests, no limit if less than 0. | `-1` |
 | **-q QPS** | Maximum QPS, no limit if less than 1. | `1` |
 | **-c CONCURRENCY** | Maximum concurrency, no limit if less than 1. | `1` |
-| **-t TIMEOUT** | Request timeout in seconds, no timeout if less than 1. | `10` |
+| **-t SECONDS** | Request timeout in seconds (float), no timeout if less than or equal to 0.0. | `10.0` |
 | **-f** | Follow HTTP redirects. | `false` |
 | **-d** | **Dry-run mode**: Preview requests without sending them. | `false` |
 | **--delivery-semantics SEMANTICS** | Delivery semantics used when resuming after a crash: `at-least-once` or `at-most-once`. See [Delivery Semantics](#delivery-semantics). | `at-least-once` |
+| **--failure-tape-buffer-size BYTES** | Buffer size of the failure tape file, in bytes. Values too small will be raised. | `16777216` |
+| **--sync-to-disk-interval SECONDS** | Interval in seconds (float) for syncing the failure tape and position file to disk. Values too small will be raised. | `0.5` |
 
 > **Note**: At least one of QPS or concurrency must be limited (i.e., $\ge 1$).
 
@@ -125,7 +127,7 @@ https://example.com/api/auth -X GET -H "Authorization: Bearer token"
 
 `httpreplay` creates companion files next to your `TAPE-FILE` to manage state:
 
-- **Failure Tape File** (`TAPE-FILE.httpreplay-failure`): Stores the raw lines of any failed requests for later analysis or retry. *Flushed every 500ms.*
+- **Failure Tape File** (`TAPE-FILE.httpreplay-failure`): Stores the raw lines of any failed requests for later analysis or retry. *Synced to disk periodically (default: every 500ms; see `--sync-to-disk-interval`).*
 - **Position File** (`TAPE-FILE.httpreplay-pos`): Tracks the last processed request index for resuming. What counts as processed depends on the delivery semantics. *Uses memory-mapping for atomic, resilient updates.*
 - **Dry-run Position File** (`TAPE-FILE.httpreplay-pos.dry-run`): A separate position file is used when running in dry-run mode (`-d`) to prevent overwriting the main position file.
 

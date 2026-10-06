@@ -100,9 +100,9 @@ func TestGeneral(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		nil,
-		true,
 	)
 
 	require.Regexp(t, "final progress:.* tapePosition=15", out.String())
@@ -232,9 +232,9 @@ func TestFollowRedirects(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		nil,
-		true,
 	)
 
 	require.Regexp(t, "final progress:.* tapePosition=4", out.String())
@@ -305,9 +305,9 @@ func TestDryRun(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		nil,
-		true,
 	)
 
 	require.Regexp(t, "final progress:.* tapePosition=4", out.String())
@@ -375,9 +375,9 @@ func TestProgressResumption(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		exitSignal,
-		true,
 	)
 
 	Main(
@@ -387,9 +387,9 @@ func TestProgressResumption(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		nil,
-		true,
 	)
 
 	Main(
@@ -399,9 +399,9 @@ func TestProgressResumption(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		nil,
-		true,
 	)
 
 	{
@@ -419,9 +419,9 @@ func TestProgressResumption(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		nil,
-		true,
 	)
 
 	server.Close()
@@ -520,12 +520,14 @@ func TestFailureTape(t *testing.T) {
 			"-c", "1",
 			"-q", "0",
 			"-t", "1",
+			"--failure-tape-buffer-size", "1024",
+			"--sync-to-disk-interval", "1",
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		nil,
-		true,
 	)
 
 	require.Regexp(t, "final progress:.* tapePosition=4", out.String())
@@ -581,9 +583,9 @@ func TestMaxNumberOfHttpRequests(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		nil,
-		true,
 	)
 
 	require.Contains(t, out.String(), "reached max number of http requests")
@@ -613,13 +615,61 @@ func TestBadArgs(t *testing.T) {
 				"/tmp/httpreplay-requests.txt",
 			},
 			out,
+			true,
 			mockExit,
 			nil,
-			true,
 		)
 	})
 
 	require.Contains(t, out.String(), "should limit at least one of qps or concurrency")
+
+	require.Panics(t, func() {
+		Main(
+			[]string{
+				"-t", "NaN",
+				"-c", "1",
+				"/tmp/httpreplay-requests.txt",
+			},
+			out,
+			true,
+			mockExit,
+			nil,
+		)
+	})
+
+	require.Contains(t, out.String(), "timeout should not be NaN")
+
+	require.Panics(t, func() {
+		Main(
+			[]string{
+				"--delivery-semantics", "invalid",
+				"-c", "1",
+				"/tmp/httpreplay-requests.txt",
+			},
+			out,
+			true,
+			mockExit,
+			nil,
+		)
+	})
+
+	require.Contains(t, out.String(), "delivery semantics should be one of at-least-once or at-most-once")
+
+	require.Panics(t, func() {
+		Main(
+			[]string{
+				"--sync-to-disk-interval", "NaN",
+				"-c", "1",
+				"/tmp/httpreplay-requests.txt",
+			},
+			out,
+			true,
+			mockExit,
+			nil,
+		)
+	})
+
+	require.Contains(t, out.String(), "sync to disk interval should not be NaN")
 }
 
 func TestEmptyTapeFile(t *testing.T) {
@@ -637,12 +687,14 @@ func TestEmptyTapeFile(t *testing.T) {
 		[]string{
 			"-c", "100",
 			"-q", "0",
+			"--failure-tape-buffer-size", "0",
+			"--sync-to-disk-interval", "0",
 			tapeFilePath,
 		},
 		out,
+		true,
 		mockExit,
 		nil,
-		true,
 	)
 
 	require.Regexp(t, "final progress:.* tapePosition=0", out.String())
@@ -683,9 +735,9 @@ func TestLargeTapeFile(t *testing.T) {
 			tapeFilePath,
 		},
 		io.Discard,
+		false,
 		mockExit,
 		nil,
-		false,
 	)
 
 	data, err := os.ReadFile(tapeFilePath + ".httpreplay-pos")
@@ -733,9 +785,9 @@ func TestDeliveryAtLeastOnce(t *testing.T) {
 				tapeFilePath,
 			},
 			io.Discard,
+			false,
 			mockExit,
 			nil,
-			false,
 		)
 	}()
 
@@ -788,9 +840,9 @@ func TestDeliveryAtMostOnce(t *testing.T) {
 				tapeFilePath,
 			},
 			io.Discard,
+			false,
 			mockExit,
 			nil,
-			false,
 		)
 	}()
 
