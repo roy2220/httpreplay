@@ -106,6 +106,7 @@ func TestGeneral(t *testing.T) {
 	)
 
 	require.Regexp(t, "final progress:.* tapePosition=15", out.String())
+	require.Regexp(t, "final progress:.* skipped=9", out.String())
 	require.Regexp(t, "final progress:.* successful=6", out.String())
 	require.Regexp(t, "final progress:.* failed=0", out.String())
 
@@ -620,7 +621,6 @@ func TestBadArgs(t *testing.T) {
 			nil,
 		)
 	})
-
 	require.Contains(t, out.String(), "should limit at least one of qps or concurrency")
 
 	require.Panics(t, func() {
@@ -636,7 +636,6 @@ func TestBadArgs(t *testing.T) {
 			nil,
 		)
 	})
-
 	require.Contains(t, out.String(), "timeout should not be NaN")
 
 	require.Panics(t, func() {
@@ -652,7 +651,6 @@ func TestBadArgs(t *testing.T) {
 			nil,
 		)
 	})
-
 	require.Contains(t, out.String(), "delivery semantics should be one of at-least-once or at-most-once")
 
 	require.Panics(t, func() {
@@ -668,7 +666,6 @@ func TestBadArgs(t *testing.T) {
 			nil,
 		)
 	})
-
 	require.Contains(t, out.String(), "sync to disk interval should not be NaN")
 }
 
@@ -797,7 +794,9 @@ func TestDeliveryAtLeastOnce(t *testing.T) {
 			return false
 		}
 		require.NoError(t, err)
-		require.Len(t, data, 8)
+		if len(data) != 8 {
+			return false
+		}
 		tapePosition := *(*int64)(unsafe.Pointer(unsafe.SliceData(data)))
 		return tapePosition == 50 && requestCount.Load() == 99
 	}, 5*time.Second, 500*time.Millisecond)
@@ -852,7 +851,9 @@ func TestDeliveryAtMostOnce(t *testing.T) {
 			return false
 		}
 		require.NoError(t, err)
-		require.Len(t, data, 8)
+		if len(data) != 8 {
+			return false
+		}
 		tapePosition := *(*int64)(unsafe.Pointer(unsafe.SliceData(data)))
 		return tapePosition == 100 && requestCount.Load() == 99
 	}, 5*time.Second, 500*time.Millisecond)

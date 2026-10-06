@@ -101,9 +101,10 @@ type httpRequester struct {
 
 	stats struct {
 		concurrency atomic.Int64
-		total       atomic.Int64
+		skipped     atomic.Int64
 		successful  atomic.Int64
 		failed      atomic.Int64
+		done        atomic.Int64
 	}
 }
 
@@ -340,6 +341,11 @@ func (r *httpRequester) dispatchHttpRequests() {
 	parser := shellwords.NewParser()
 	parser.ParseComment = true
 
+	skipLine := func(tapePosition int64) {
+		r.stats.skipped.Add(1)
+		r.tapePositionTracker.SubmitTapePosition(tapePosition)
+	}
+
 	acquireConcurrencyToken := func() (func(), bool) { return func() {}, true }
 	if r.config.ConcurrencyLimit >= 1 {
 		concurrencyTokens := make(chan struct{}, r.config.ConcurrencyLimit)
@@ -371,26 +377,26 @@ func (r *httpRequester) dispatchHttpRequests() {
 	for tapePosition, line := range r.readTape() {
 		args, err := parser.Parse(line)
 		if err != nil {
-			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			r.config.Logger.Printf("[WARN] failed to parse args; tapePosition=%v: %v", tapePosition, err)
+			skipLine(tapePosition)
 			continue
 		}
 		if len(args) == 0 {
-			r.tapePositionTracker.SubmitTapePosition(tapePosition)
+			skipLine(tapePosition)
 			continue
 		}
 
 		curlCommand, err := parseCurlCommand(args)
 		if err != nil {
-			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			r.config.Logger.Printf("[WARN] failed to parse curl command; tapePosition=%v: %v", tapePosition, err)
+			skipLine(tapePosition)
 			continue
 		}
 
 		httpRequest, err := r.buildHttpRequest(curlCommand)
 		if err != nil {
-			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			r.config.Logger.Printf("[WARN] failed to build http request; tapePosition=%v: %v", tapePosition, err)
+			skipLine(tapePosition)
 			continue
 		}
 
@@ -618,9 +624,11 @@ func (r *httpRequester) buildHttpRequest(curlCommand curlCommand) (*http.Request
 
 func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 	r.stats.concurrency.Add(1)
-	defer r.stats.concurrency.Add(-1)
+	defer func() {
+		r.stats.concurrency.Add(-1)
+		r.stats.done.Add(1)
+	}()
 
-	r.stats.total.Add(1)
 	if r.config.DryRun {
 		if httpRequest.Body == nil {
 			r.config.Logger.Printf("[INFO] <dry-run> http request: method=%q url=%q header=%q", httpRequest.Method, httpRequest.URL.String(), httpRequest.Header)
@@ -680,6 +688,10 @@ func (r *httpRequester) syncToDiskPeriodically() {
 		case <-ticker.C:
 		}
 
+		if r.config.Debug {
+			r.config.Logger.Print("[DEBUG] syncing to disk...")
+		}
+
 		{
 			r.failureTapeLock.Lock()
 			err1 := r.failureTape.Flush()
@@ -704,7 +716,7 @@ func (r *httpRequester) logProgress() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	prevTotal := int64(0)
+	prevDone := int64(0)
 	for next := true; next; {
 		select {
 		case <-r.idleness:
@@ -721,9 +733,10 @@ func (r *httpRequester) logProgress() {
 
 		tapePosition := r.tapePositionTracker.TapePosition()
 		concurrency := r.stats.concurrency.Load()
-		total := r.stats.total.Load()
-		qps := total - prevTotal
-		prevTotal = total
+		skipped := r.stats.skipped.Load()
+		done := r.stats.done.Load()
+		qps := done - prevDone
+		prevDone = done
 		successful := r.stats.successful.Load()
 		failed := r.stats.failed.Load()
 
@@ -734,8 +747,8 @@ func (r *httpRequester) logProgress() {
 			successRate = fmt.Sprintf("%.2f", float64(successful)/float64(n))
 		}
 
-		r.config.Logger.Printf("[INFO] %v: tapePosition=%v qps=%v concurrency=%v successful=%v failed=%v successRate=%v",
-			title, tapePosition, qps, concurrency, successful, failed, successRate)
+		r.config.Logger.Printf("[INFO] %v: tapePosition=%v qps=%v concurrency=%v skipped=%v successful=%v failed=%v successRate=%v",
+			title, tapePosition, qps, concurrency, skipped, successful, failed, successRate)
 	}
 }
 
