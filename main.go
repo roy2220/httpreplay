@@ -92,6 +92,7 @@ type httpRequester struct {
 	failureTapeFile     *os.File
 	failureTapeLock     sync.Mutex
 	failureTape         *bufio.Writer
+	failureTapeIsDirty  bool
 	httpClient          *http.Client
 
 	backgroundCtx context.Context
@@ -669,6 +670,7 @@ func (r *httpRequester) recordFailedHttpRequest(line string) {
 	r.failureTapeLock.Lock()
 	_, err1 := r.failureTape.WriteString(line)
 	err2 := r.failureTape.WriteByte('\n')
+	r.failureTapeIsDirty = true
 	r.failureTapeLock.Unlock()
 
 	err := errors.Join(err1, err2)
@@ -693,10 +695,17 @@ func (r *httpRequester) syncToDiskPeriodically() {
 		}
 
 		{
+			var err1, err2 error
 			r.failureTapeLock.Lock()
-			err1 := r.failureTape.Flush()
-			err2 := r.failureTapeFile.Sync()
+			if r.failureTapeIsDirty {
+				err1 = r.failureTape.Flush()
+				err2 = r.failureTapeFile.Sync()
+				if err1 == nil && err2 == nil {
+					r.failureTapeIsDirty = false
+				}
+			}
 			r.failureTapeLock.Unlock()
+
 			err := errors.Join(err1, err2)
 			if err != nil {
 				r.config.Logger.Printf("[WARN] failed to sync failure tape to disk: %v", err)
@@ -741,10 +750,10 @@ func (r *httpRequester) logProgress() {
 		failed := r.stats.failed.Load()
 
 		var successRate string
-		if n := successful + failed; n == 0 {
+		if total := successful + failed; total == 0 {
 			successRate = "N/A"
 		} else {
-			successRate = fmt.Sprintf("%.2f", float64(successful)/float64(n))
+			successRate = fmt.Sprintf("%.2f", float64(successful)/float64(total))
 		}
 
 		r.config.Logger.Printf("[INFO] %v: tapePosition=%v qps=%v concurrency=%v skipped=%v successful=%v failed=%v successRate=%v",
