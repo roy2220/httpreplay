@@ -31,22 +31,22 @@ func parseCurlCommand(args []string) (curlCommand, error) {
 	}
 	for ; i < n; i++ {
 		arg := args[i]
-		if v, err, ok := getFlagValue(arg, "-X", "--request", popNextArg); ok {
+		if flagValue, err, ok := matchCurlFlag(arg, "-X", "--request", popNextArg); ok {
 			if err != nil {
 				return curlCommand{}, err
 			}
-			curlCommand1.Request = v
+			curlCommand1.Request = flagValue
 			continue
 		}
-		if v, err, ok := getFlagValue(arg, "-H", "--header", popNextArg); ok {
+		if flagValue, err, ok := matchCurlFlag(arg, "-H", "--header", popNextArg); ok {
 			if err != nil {
 				return curlCommand{}, err
 			}
-			key, _, ok := strings.Cut(v, ":")
+			key, _, ok := strings.Cut(flagValue, ":")
 			if !ok {
-				return curlCommand{}, fmt.Errorf("invalid header: %v", v)
+				return curlCommand{}, fmt.Errorf("invalid header: %v", flagValue)
 			}
-			if strings.ToLower(key) == "content-type" {
+			if strings.EqualFold(key, "Content-Type") {
 				contentTypeHeaderIsSet = true
 			}
 			header := curlCommand1.Header
@@ -56,10 +56,10 @@ func parseCurlCommand(args []string) (curlCommand, error) {
 			} else {
 				header.WriteString("\r\n")
 			}
-			header.WriteString(v)
+			header.WriteString(flagValue)
 			continue
 		}
-		if v, err, ok := getFlagValue(arg, "-d", "--data", popNextArg); ok {
+		if flagValue, err, ok := matchCurlFlag(arg, "-d", "--data", popNextArg); ok {
 			if err != nil {
 				return curlCommand{}, err
 			}
@@ -70,7 +70,7 @@ func parseCurlCommand(args []string) (curlCommand, error) {
 			} else {
 				data.WriteByte('&')
 			}
-			data.WriteString(v)
+			data.WriteString(flagValue)
 			continue
 		}
 		if strings.HasPrefix(arg, "-") {
@@ -111,28 +111,35 @@ func parseCurlCommand(args []string) (curlCommand, error) {
 	return curlCommand1, nil
 }
 
-func getFlagValue(arg, flagName, longFlagName string, popNextArg func() (string, bool)) (string, error, bool) {
-	longFlagMode := false
-	v := strings.TrimPrefix(arg, flagName)
-	if len(v) == len(arg) {
-		longFlagMode = true
-		v = strings.TrimPrefix(arg, longFlagName)
-	}
-	if len(v) == len(arg) {
+func matchCurlFlag(arg, shortFlagName, longFlagName string, popNextArg func() (string, bool)) (string, error, bool) {
+	var (
+		flagMode  byte
+		flagValue string
+	)
+	switch {
+	case strings.HasPrefix(arg, shortFlagName):
+		flagMode = 'S'
+		flagValue = arg[len(shortFlagName):]
+	case strings.HasPrefix(arg, longFlagName):
+		flagMode = 'L'
+		flagValue = arg[len(longFlagName):]
+	default:
 		return "", nil, false
 	}
-	if v == "" {
+	if flagValue == "" {
 		var ok bool
-		v, ok = popNextArg()
+		flagValue, ok = popNextArg()
 		if !ok {
-			return "", fmt.Errorf("missing flag value for %v/%v", flagName, longFlagName), true
+			return "", fmt.Errorf("missing flag value for %v/%v", shortFlagName, longFlagName), true
 		}
-	} else if v[0] == '=' {
-		v = v[1:]
 	} else {
-		if longFlagMode {
-			return "", nil, false
+		if flagValue[0] == '=' {
+			flagValue = flagValue[1:]
+		} else {
+			if flagMode == 'L' {
+				return "", nil, false
+			}
 		}
 	}
-	return v, nil, true
+	return flagValue, nil, true
 }

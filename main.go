@@ -53,13 +53,12 @@ const (
 )
 
 var version = func() string {
-	version := "unknown"
 	if buildInfo, ok := debug.ReadBuildInfo(); ok {
 		if v := buildInfo.Main.Version; v != "" {
-			version = v
+			return v
 		}
 	}
-	return version
+	return "unknown"
 }()
 
 type args struct {
