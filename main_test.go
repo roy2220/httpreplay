@@ -542,7 +542,7 @@ func TestFailureTape(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, fmt.Sprintf(`
 %[1]s/api?v=0  # STATUS CODE: 500
-%[1]s/api?v=2 -X GET -H 'X-Foo: Bar'  # ERROR: Get "%[1]s/api?v=2": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+%[1]s/api?v=2 -X GET -H 'X-Foo: Bar'  # ERROR: Get "%[1]s/api?v=2": context deadline exceeded
 `, server.URL)[1:], string(data))
 }
 
@@ -637,6 +637,66 @@ func TestBadArgs(t *testing.T) {
 		)
 	})
 	require.Contains(t, out.String(), "timeout should not be NaN")
+
+	require.Panics(t, func() {
+		Main(
+			[]string{
+				"--clb-hot-conns-per-host", "0",
+				"-c", "1",
+				"/tmp/httpreplay-requests.txt",
+			},
+			out,
+			true,
+			mockExit,
+			nil,
+		)
+	})
+	require.Contains(t, out.String(), "hot conns per host should be positive")
+
+	require.Panics(t, func() {
+		Main(
+			[]string{
+				"--clb-max-conn-age", "0",
+				"-c", "1",
+				"/tmp/httpreplay-requests.txt",
+			},
+			out,
+			true,
+			mockExit,
+			nil,
+		)
+	})
+	require.Contains(t, out.String(), "max conn age should be positive")
+
+	require.Panics(t, func() {
+		Main(
+			[]string{
+				"--clb-max-conn-age-jitter", "0",
+				"-c", "1",
+				"/tmp/httpreplay-requests.txt",
+			},
+			out,
+			true,
+			mockExit,
+			nil,
+		)
+	})
+	require.Contains(t, out.String(), "max conn age jitter should be in (0.0, 1.0]")
+
+	require.Panics(t, func() {
+		Main(
+			[]string{
+				"--clb-max-conn-age-jitter", "1.5",
+				"-c", "1",
+				"/tmp/httpreplay-requests.txt",
+			},
+			out,
+			true,
+			mockExit,
+			nil,
+		)
+	})
+	require.Contains(t, out.String(), "max conn age jitter should be in (0.0, 1.0]")
 
 	require.Panics(t, func() {
 		Main(
@@ -743,6 +803,55 @@ func TestLargeTapeFile(t *testing.T) {
 	tapePosition := *(*int64)(unsafe.Pointer(unsafe.SliceData(data)))
 	require.Equal(t, int64(2000), tapePosition)
 	require.Equal(t, int64(2000), requestCount.Load())
+}
+
+func TestClientSideLoadBalancing(t *testing.T) {
+	t.Parallel()
+
+	var requestCount atomic.Int64
+	var connAddrs sync.Map
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		connAddrs.Store(r.RemoteAddr, nil)
+	}))
+	t.Cleanup(server.Close)
+
+	tempDirPath := t.TempDir()
+	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
+	f, err := os.OpenFile(tapeFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	require.NoError(t, err)
+	buffer := bufio.NewWriterSize(f, 8*1024*1024)
+	line := fmt.Sprintf("%s/test\n", server.URL)
+	for range 200 {
+		_, err = buffer.WriteString(line)
+		require.NoError(t, err)
+	}
+	err = buffer.Flush()
+	require.NoError(t, err)
+	err = f.Close()
+	require.NoError(t, err)
+
+	Main(
+		[]string{
+			"-c", "1",
+			"-q", "0",
+			"--clb-hot-conns-per-host=20",
+			tapeFilePath,
+		},
+		io.Discard,
+		false,
+		mockExit,
+		nil,
+	)
+
+	require.Equal(t, int64(200), requestCount.Load())
+
+	var connCount int
+	connAddrs.Range(func(_, _ any) bool {
+		connCount++
+		return true
+	})
+	require.Equal(t, 20, connCount)
 }
 
 func TestDeliveryAtLeastOnce(t *testing.T) {

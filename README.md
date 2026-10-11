@@ -2,17 +2,17 @@
 
 [![Coverage](./.badges/coverage.svg)](#)
 
-`httpreplay` is an **efficient, resumable** command-line interface (CLI) tool for replaying HTTP requests from a tape file. It efficiently simulates traffic while enforcing configurable **QPS** (queries per second) and **concurrency** limits.
+`httpreplay` is an **efficient, resumable** command-line interface (CLI) tool for replaying HTTP requests from a tape file. It simulates traffic while enforcing configurable **QPS** (queries per second) and **concurrency** limits.
 
 > [!NOTE]
 > Except for the documentation, every line of code is human-crafted. **No AI slop included**.
 
 ## Features
 
-- **Resumable Operations**: Automatically tracks and saves the last processed request position using an **atomic position file (mmap-based)**, allowing for safe, interruption-tolerant restarts (e.g., after `Ctrl+C` or system failure).
 - Replay HTTP requests from a specified tape file (in a `curl`-like format).
 - Configurable **QPS** and **concurrency** limits.
-- Adjustable HTTP request timeout.
+- **Resumable Operations**: Automatically tracks and saves the last processed request position using a position file, allowing for safe, interruption-tolerant restarts (e.g., after `Ctrl+C` or system failure).
+- **Client-Side Load Balancing**: Prevents replayed traffic from being pinned to a single backend behind a host.
 - Dry-run mode to preview requests without sending them.
 - Logs failed requests to a dedicated failure tape file for easy retry or analysis.
 - Detailed progress logging with real-time success rate and QPS metrics.
@@ -28,7 +28,7 @@ Visit the [Latest Release](https://github.com/roy2220/httpreplay/releases/latest
 
 ### Option 2: Build from Source
 
-Requires Go toolchain 1.24+.
+Requires Go toolchain 1.26+.
 
 ```bash
 GOBIN=${PWD} CGO_ENABLED=0 go install github.com/roy2220/httpreplay@latest
@@ -41,10 +41,10 @@ GOBIN=${PWD} CGO_ENABLED=0 go install github.com/roy2220/httpreplay@latest
 Run `httpreplay` with the required tape file and optional flags:
 
 ```bash
-httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t SECONDS] [-f] [-d] [--delivery-semantics SEMANTICS] [--failure-tape-buffer-size BYTES] [--sync-to-disk-interval SECONDS]
-````
+httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t SECONDS] [-f] [-d] [--clb-hot-conns-per-host NUM] [--clb-max-conn-age SECONDS] [--clb-max-conn-age-jitter FRACTION] [--delivery-semantics SEMANTICS] [--failure-tape-buffer-size BYTES] [--sync-to-disk-interval SECONDS]
+```
 
-### Arguments
+### Basic Arguments
 
 | Argument | Description | Default |
 | :--- | :--- | :--- |
@@ -55,11 +55,19 @@ httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t SECONDS] [-f] [-d] [
 | **-t SECONDS** | Request timeout in seconds (float), no timeout if less than or equal to 0.0. | `10.0` |
 | **-f** | Follow HTTP redirects. | `false` |
 | **-d** | **Dry-run mode**: Preview requests without sending them. | `false` |
+
+> **Note**: At least one of QPS or concurrency must be limited (i.e., $\ge 1$).
+
+### Advanced Arguments
+
+| Argument | Description | Default |
+| :--- | :--- | :--- |
+| **--clb-hot-conns-per-host NUM** | [Client-Side Load Balancing](#client-side-load-balancing): minimum number of independent connections actively used per host. | `10` |
+| **--clb-max-conn-age SECONDS** | [Client-Side Load Balancing](#client-side-load-balancing): soft upper bound on how long a connection may be reused, in seconds (float); in-flight requests are allowed to finish. | `300.0` |
+| **--clb-max-conn-age-jitter FRACTION** | [Client-Side Load Balancing](#client-side-load-balancing): jitter fraction in (0.0, 1.0] applied to the maximum connection age; the effective age is drawn uniformly from `[(1-jitter)*max, (1+jitter)*max]`. | `0.5` |
 | **--delivery-semantics SEMANTICS** | Delivery semantics used when resuming after a crash: `at-least-once` or `at-most-once`. See [Delivery Semantics](#delivery-semantics). | `at-least-once` |
 | **--failure-tape-buffer-size BYTES** | Buffer size of the failure tape file, in bytes. Values too small will be raised. | `16777216` |
 | **--sync-to-disk-interval SECONDS** | Interval in seconds (float) for syncing the failure tape and position file to disk. Values too small will be raised. | `0.5` |
-
-> **Note**: At least one of QPS or concurrency must be limited (i.e., $\ge 1$).
 
 -----
 
@@ -135,15 +143,24 @@ https://example.com/api/auth -X GET -H "Authorization: Bearer token"
 
 ## Logging
 
-- **Progress Logs**: Displayed every second, showing the tape position, real-time QPS, current concurrency, successful/failed counts, and success rate.
+- **Progress Logs**: Displayed every second, showing the tape position, real-time QPS, current concurrency, skipped/successful/failed counts, and success rate.
 - **Debug Logs**: Enable verbose logging for parsed HTTP requests by setting the environment variable `DEBUG=1`.
 - **Errors/Warnings**: Logged with `[WARN]` or `[FATAL]` for file issues, parsing failures, etc.
 
 **Example Progress Log:**
 
 ```
-[INFO] current progress: tapePosition=100 qps=50 concurrency=5 successful=95 failed=5 successRate=0.95
+[INFO] current progress: tapePosition=100 qps=50 concurrency=5 skipped=0 successful=95 failed=5 successRate=0.95
 ```
+
+-----
+
+## Client-Side Load Balancing
+
+Keep-alive connections can pin replayed traffic to one or a few of the backends behind a single host. Two knobs spread it out:
+
+- **Hot connections per host** (`--clb-hot-conns-per-host`): requests fan out across at least this many independent connections, so even a QPS-1 replay reaches multiple backends.
+- **Maximum connection age** (`--clb-max-conn-age`, `--clb-max-conn-age-jitter`): a connection stops taking new requests once it reaches this age (in-flight ones finish), and new requests re-pick the target backend via a new connection. Jitter draws each effective age uniformly from `[(1-jitter)*max, (1+jitter)*max]`, so connections don't all retire at once.
 
 -----
 

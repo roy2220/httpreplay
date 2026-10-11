@@ -69,9 +69,13 @@ type args struct {
 	RequestTimeout          float64 `arg:"-t,--" placeholder:"SECONDS" help:"request timeout in seconds (float), no timeout if less than or equal to 0.0" default:"10.0"`
 	FollowRedirects         bool    `arg:"-f,--" help:"follow HTTP redirects" default:"false"`
 	DryRun                  bool    `arg:"-d,--" help:"dry-run mode" default:"false"`
-	DeliverySemantics       string  `arg:"--,--delivery-semantics" placeholder:"SEMANTICS" help:"delivery semantics for resuming after a crash (one of at-least-once, at-most-once)" default:"at-least-once"`
-	FailureTapeBufferSize   int     `arg:"--,--failure-tape-buffer-size" placeholder:"BYTES" help:"buffer size of the failure tape file, in bytes; values too small will be raised" default:"16777216"`
-	SyncToDiskInterval      float64 `arg:"--,--sync-to-disk-interval" placeholder:"SECONDS" help:"interval in seconds (float) for syncing the failure tape and position file to disk; values too small will be raised" default:"0.5"`
+
+	ClbHotConnsPerHost    int     `arg:"--,--clb-hot-conns-per-host" placeholder:"NUM" help:"client-side load balancing: minimum number of independent connections actively used per host" default:"10"`
+	ClbMaxConnAge         float64 `arg:"--,--clb-max-conn-age" placeholder:"SECONDS" help:"client-side load balancing: soft upper bound on how long a connection may be reused, in seconds (float); in-flight requests are allowed to finish" default:"300.0"`
+	ClbMaxConnAgeJitter   float64 `arg:"--,--clb-max-conn-age-jitter" placeholder:"FRACTION" help:"client-side load balancing: jitter fraction in (0.0, 1.0] applied to the maximum connection age; the effective age is drawn uniformly from [(1-jitter)*max, (1+jitter)*max]" default:"0.5"`
+	DeliverySemantics     string  `arg:"--,--delivery-semantics" placeholder:"SEMANTICS" help:"delivery semantics for resuming after a crash (one of at-least-once, at-most-once)" default:"at-least-once"`
+	FailureTapeBufferSize int     `arg:"--,--failure-tape-buffer-size" placeholder:"BYTES" help:"buffer size of the failure tape file, in bytes; values too small will be raised" default:"16777216"`
+	SyncToDiskInterval    float64 `arg:"--,--sync-to-disk-interval" placeholder:"SECONDS" help:"interval in seconds (float) for syncing the failure tape and position file to disk; values too small will be raised" default:"0.5"`
 }
 
 func (args) Version() string { return "httpreplay " + version }
@@ -99,6 +103,15 @@ func mustParseHttpRequesterConfig(
 		if math.IsNaN(args.RequestTimeout) {
 			parser.Fail("request timeout should not be NaN")
 		}
+		if args.ClbHotConnsPerHost < 1 {
+			parser.Fail("client-side load balancing: hot conns per host should be positive")
+		}
+		if !(args.ClbMaxConnAge > 0.0) {
+			parser.Fail("client-side load balancing: max conn age should be positive")
+		}
+		if !(args.ClbMaxConnAgeJitter > 0.0 && args.ClbMaxConnAgeJitter <= 1.0) {
+			parser.Fail("client-side load balancing: max conn age jitter should be in (0.0, 1.0]")
+		}
 		switch args.DeliverySemantics {
 		case "at-least-once":
 			deliverySemantics = deliveryAtLeastOnce
@@ -120,6 +133,9 @@ func mustParseHttpRequesterConfig(
 		RequestTimeout:          max(time.Duration(args.RequestTimeout*float64(time.Second)), 0),
 		FollowRedirects:         args.FollowRedirects,
 		DryRun:                  args.DryRun,
+		ClbHotConnsPerHost:      args.ClbHotConnsPerHost,
+		ClbMaxConnAge:           max(time.Duration(args.ClbMaxConnAge*float64(time.Second)), 1),
+		ClbMaxConnAgeJitter:     args.ClbMaxConnAgeJitter,
 		DeliverySemantics:       deliverySemantics,
 		FailureTapeBufferSize:   max(args.FailureTapeBufferSize, minFailureTapeBufferSize),
 		SyncToDiskInterval:      max(time.Duration(args.SyncToDiskInterval*float64(time.Second)), minSyncToDiskInterval),

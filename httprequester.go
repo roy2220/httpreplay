@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-shellwords"
+	"github.com/roy2220/clbtransport"
 	"go.uber.org/ratelimit"
 )
 
@@ -60,6 +61,9 @@ type httpRequesterConfig struct {
 	RequestTimeout          time.Duration
 	FollowRedirects         bool
 	DryRun                  bool
+	ClbHotConnsPerHost      int
+	ClbMaxConnAge           time.Duration
+	ClbMaxConnAgeJitter     float64
 	DeliverySemantics       deliverySemantics
 	FailureTapeBufferSize   int
 	SyncToDiskInterval      time.Duration
@@ -115,21 +119,27 @@ func newHttpRequester(config httpRequesterConfig) (_ *httpRequester, returnedErr
 			}
 		}
 	}()
-	httpClient := http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   config.RequestTimeout,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          10000,
-			MaxIdleConnsPerHost:   max(10, config.ConcurrencyLimit),
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   config.RequestTimeout,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
+	transportConfig := clbtransport.TransportConfig{
+		HotConnsPerHost:             config.ClbHotConnsPerHost,
+		ApproximateMaxConnAge:       config.ClbMaxConnAge,
+		ApproximateMaxConnAgeJitter: config.ClbMaxConnAgeJitter,
 
-		Timeout: config.RequestTimeout,
+		DialContext: (&net.Dialer{
+			Timeout:   config.RequestTimeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          10000,
+		MaxIdleConnsPerHost:   config.ConcurrencyLimit,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   config.RequestTimeout,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	if transportConfig.MaxIdleConnsPerHost < 1 {
+		transportConfig.MaxIdleConnsPerHost = 100
+	}
+	httpClient := http.Client{
+		Transport: clbtransport.NewTransport(transportConfig),
 	}
 	if !config.FollowRedirects {
 		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -150,28 +160,15 @@ func newHttpRequester(config httpRequesterConfig) (_ *httpRequester, returnedErr
 
 func (r *httpRequester) start() {
 	r.backgroundCtx, r.cancel = context.WithCancel(context.Background())
-
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
-		r.dispatchHttpRequests()
-	}()
-
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
-		r.syncToDiskPeriodically()
-	}()
-
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
-		r.logProgress()
-	}()
+	r.wg.Go(r.dispatchHttpRequests)
+	r.wg.Go(r.syncToDiskPeriodically)
+	r.wg.Go(r.logProgress)
 }
 
 func (r *httpRequester) Close() {
 	r.stop()
+
+	r.httpClient.CloseIdleConnections()
 
 	err := r.tapeReader.Close()
 	if err != nil {
@@ -299,19 +296,15 @@ func (r *httpRequester) dispatchHttpRequests() {
 			r.tapePositionTracker.SubmitTapePosition(tapePosition)
 		}
 
-		wg.Add(1)
-		go func() {
-			defer func() {
-				wg.Done()
-				releaseConcurrencyToken()
-			}()
+		wg.Go(func() {
+			defer releaseConcurrencyToken()
 
 			r.doHttpRequest(httpRequest, line)
 
 			if r.config.DeliverySemantics == deliveryAtLeastOnce {
 				r.tapePositionTracker.SubmitTapePosition(tapePosition)
 			}
-		}()
+		})
 	}
 
 	noMoreHttpRequests = true
@@ -389,6 +382,11 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 		return
 	}
 
+	if r.config.RequestTimeout >= 1 {
+		ctx, cancel := context.WithTimeout(context.Background(), r.config.RequestTimeout)
+		defer cancel()
+		*httpRequest = *httpRequest.WithContext(ctx)
+	}
 	resp, err := r.httpClient.Do(httpRequest)
 	if err != nil {
 		if r.config.Debug {
