@@ -542,7 +542,7 @@ func TestFailureTape(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, fmt.Sprintf(`
 '%[1]s/api?v=0'  # STATUS CODE: 500
-'%[1]s/api?v=2' -X GET -H 'X-Foo: Bar'  # ERROR: Get "%[1]s/api?v=2": context deadline exceeded
+'%[1]s/api?v=2' -X GET -H 'X-Foo: Bar'  # ERROR: Get "...": context deadline exceeded
 `, server.URL)[1:], string(data))
 }
 

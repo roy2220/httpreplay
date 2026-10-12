@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -393,6 +394,9 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 			r.config.Logger.Printf("[DEBUG] failed to do http request: %v", err)
 		}
 		r.stats.failed.Add(1)
+		if e := (*url.Error)(nil); errors.As(err, &e) {
+			e.URL = "..."
+		}
 		line = fmt.Sprintf("%v  # ERROR: %v", line, strings.ReplaceAll(err.Error(), "\n", ""))
 		r.recordFailedHttpRequest(line)
 		return
