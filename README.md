@@ -78,15 +78,15 @@ The tape file contains **one HTTP request per line**, in a format similar to `cu
 **Key Flags Supported:**
 
 - `-X`, `--request`: HTTP method (e.g., `POST`, `PUT`). Default is `GET`.
-- `-H`, `--header`: Header (e.g., `"Content-Type: application/json"`).
+- `-H`, `--header`: Header (e.g., `Content-Type: application/json`).
 - `-d`, `--data`: Request body/data.
 
 ### Example Tape File (`requests.txt`)
 
 ```
-https://example.com/api/status  # Shell-style comments are allowed
-https://example.com/api/post -X POST -H "Content-Type: application/json" -d '{"key":"value"}'
-https://example.com/api/auth -X GET -H "Authorization: Bearer token"
+'https://example.com/api/demo?foo=bar'  # Shell-style comments are allowed
+'https://example.com/api/post' -X POST -H 'Content-Type: application/json' -d '{"key":"value"}'
+'https://example.com/api/auth' -X GET -H 'Authorization: Bearer token'
 ```
 
 -----

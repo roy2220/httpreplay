@@ -72,19 +72,19 @@ func TestGeneral(t *testing.T) {
 	tempDirPath := t.TempDir()
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
-%[1]s/api?v=0
--H'X-Foo: Bar' %[1]s/api?v=1
-%[1]s/api?v=2 -X=GET -H 'X-Foo: Bar'  # my comment
-%[1]s/api?v=3 -H'X-Foo: Bar' --request POST --data='{"key": "value"}' --header 'X-Hello: World' --header='Content-Type: application/json'
-%[1]s/api?v=4 -d 'foo=bar'
-%[1]s/api?v=5 -d 'foo=bar' -d 'key=val' -H 'Host: example.com' -H 'User-Agent: Test'
+'%[1]s/api?v=0'
+-H'X-Foo: Bar' '%[1]s/api?v=1'
+'%[1]s/api?v=2&foo=bar' -X=GET -H 'X-Foo: Bar'  # my comment
+'%[1]s/api?v=3' -H'X-Foo: Bar' --request POST --data='{"key": "value"}' --header 'X-Hello: World' --header='Content-Type: application/json'
+'%[1]s/api?v=4' -d 'foo=bar'
+'%[1]s/api?v=5' -d 'foo=bar' -d 'key=val' -H 'Host: example.com' -H 'User-Agent: Test'
 
  # invalid requests
-%[1]s/api?v=7 --unsupported-flag
-%[1]s/api?v=8 -H
-%[1]s/api?v=9 -d 'foo
-%[1]s/api?v=10 -X "\n"
-%[1]s/api?v=11 -H ':::'
+'%[1]s/api?v=7' --unsupported-flag
+'%[1]s/api?v=8' -H
+'%[1]s/api?v=9' -d 'foo
+'%[1]s/api?v=10' -X "\n"
+'%[1]s/api?v=11' -H ':::'
 -X GET
 ''
 `, server.URL)[1:], 0644)
@@ -136,7 +136,7 @@ func TestGeneral(t *testing.T) {
 	require.Equal(t, request{
 		Method: "GET",
 		Host:   host,
-		URI:    "/api?v=2",
+		URI:    "/api?v=2&foo=bar",
 		Header: http.Header{
 			"X-Foo":      []string{"Bar"},
 			"User-Agent": []string{"httpreplay/(devel)"},
@@ -215,10 +215,10 @@ func TestFollowRedirects(t *testing.T) {
 	tempDirPath := t.TempDir()
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
-%[1]s/api?v=0
-%[1]s/api?v=1 -H 'X-Foo: Bar'
-%[1]s/api?v=2 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=3 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
+'%[1]s/api?v=0'
+'%[1]s/api?v=1' -H 'X-Foo: Bar'
+'%[1]s/api?v=2' -X GET -H 'X-Foo: Bar'
+'%[1]s/api?v=3' -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
@@ -288,10 +288,10 @@ func TestDryRun(t *testing.T) {
 	tempDirPath := t.TempDir()
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
-%[1]s/api?v=0
-%[1]s/api?v=1 -H 'X-Foo: Bar'
-%[1]s/api?v=2 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=3 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
+'%[1]s/api?v=0'
+'%[1]s/api?v=1' -H 'X-Foo: Bar'
+'%[1]s/api?v=2' -X GET -H 'X-Foo: Bar'
+'%[1]s/api?v=3' -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
@@ -354,13 +354,13 @@ func TestProgressResumption(t *testing.T) {
 	tempDirPath := t.TempDir()
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
-%[1]s/api?v=0
+'%[1]s/api?v=0'
 
-%[1]s/api?v=1 -H 'X-Foo: Bar'
-%[1]s/api?v=2 -X GET -H 'X-Foo: Bar' # my comment
+'%[1]s/api?v=1' -H 'X-Foo: Bar'
+'%[1]s/api?v=2' -X GET -H 'X-Foo: Bar' # my comment
 
-   # %[1]s/api?v=333 -X GET -H 'X-Foo: Bar'
-   %[1]s/api?v=3 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'`, server.URL)[1:], 0644)
+   # '%[1]s/api?v=333' -X GET -H 'X-Foo: Bar'
+   '%[1]s/api?v=3' -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'`, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
 	out := bytes.NewBuffer(nil)
@@ -408,7 +408,7 @@ func TestProgressResumption(t *testing.T) {
 	{
 		f, err := os.OpenFile(tapeFilePath, os.O_APPEND|os.O_WRONLY, 0644)
 		require.NoError(t, err)
-		_, err = fmt.Fprintf(f, "\n%s/api?v=4 -d 'foo=bar'\n", server.URL)
+		_, err = fmt.Fprintf(f, "\n'%s/api?v=4' -d 'foo=bar'\n", server.URL)
 		require.NoError(t, err)
 		f.Close()
 	}
@@ -506,10 +506,10 @@ func TestFailureTape(t *testing.T) {
 	tempDirPath := t.TempDir()
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
-%[1]s/api?v=0
-%[1]s/api?v=1 -H 'X-Foo: Bar'
-%[1]s/api?v=2 -X GET -H 'X-Foo: Bar'
-%[1]s/api?v=3 -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
+'%[1]s/api?v=0'
+'%[1]s/api?v=1' -H 'X-Foo: Bar'
+'%[1]s/api?v=2' -X GET -H 'X-Foo: Bar'
+'%[1]s/api?v=3' -X POST -d '{"key": "value"}' -H 'Content-Type: application/json'
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
@@ -541,8 +541,8 @@ func TestFailureTape(t *testing.T) {
 	data, err := os.ReadFile(tapeFilePath + ".httpreplay-failure")
 	require.NoError(t, err)
 	require.Equal(t, fmt.Sprintf(`
-%[1]s/api?v=0  # STATUS CODE: 500
-%[1]s/api?v=2 -X GET -H 'X-Foo: Bar'  # ERROR: Get "%[1]s/api?v=2": context deadline exceeded
+'%[1]s/api?v=0'  # STATUS CODE: 500
+'%[1]s/api?v=2' -X GET -H 'X-Foo: Bar'  # ERROR: Get "%[1]s/api?v=2": context deadline exceeded
 `, server.URL)[1:], string(data))
 }
 
@@ -566,10 +566,10 @@ func TestMaxNumberOfHttpRequests(t *testing.T) {
 	tempDirPath := t.TempDir()
 	tapeFilePath := filepath.Join(tempDirPath, "requests.txt")
 	err := os.WriteFile(tapeFilePath, fmt.Appendf(nil, `
-%[1]s/api?v=0
-%[1]s/api?v=1
-%[1]s/api?v=2
-%[1]s/api?v=3
+'%[1]s/api?v=0'
+'%[1]s/api?v=1'
+'%[1]s/api?v=2'
+'%[1]s/api?v=3'
 `, server.URL)[1:], 0644)
 	require.NoError(t, err)
 
@@ -774,7 +774,7 @@ func TestLargeTapeFile(t *testing.T) {
 	f, err := os.OpenFile(tapeFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	require.NoError(t, err)
 	buffer := bufio.NewWriterSize(f, 8*1024*1024)
-	line := fmt.Sprintf("%s/test\n", server.URL)
+	line := fmt.Sprintf("'%s/test'\n", server.URL)
 	for range 2000 {
 		_, err = buffer.WriteString(line)
 		require.NoError(t, err)
@@ -821,7 +821,7 @@ func TestClientSideLoadBalancing(t *testing.T) {
 	f, err := os.OpenFile(tapeFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	require.NoError(t, err)
 	buffer := bufio.NewWriterSize(f, 8*1024*1024)
-	line := fmt.Sprintf("%s/test\n", server.URL)
+	line := fmt.Sprintf("'%s/test'\n", server.URL)
 	for range 200 {
 		_, err = buffer.WriteString(line)
 		require.NoError(t, err)
@@ -872,7 +872,7 @@ func TestDeliveryAtLeastOnce(t *testing.T) {
 	require.NoError(t, err)
 	buffer := bufio.NewWriterSize(f, 8*1024*1024)
 	for i := range 100 {
-		line := fmt.Sprintf("%s/test?k=%d\n", server.URL, i+1)
+		line := fmt.Sprintf("'%s/test?k=%d'\n", server.URL, i+1)
 		_, err = buffer.WriteString(line)
 		require.NoError(t, err)
 	}
@@ -929,7 +929,7 @@ func TestDeliveryAtMostOnce(t *testing.T) {
 	require.NoError(t, err)
 	buffer := bufio.NewWriterSize(f, 8*1024*1024)
 	for i := range 100 {
-		line := fmt.Sprintf("%s/test?k=%d\n", server.URL, i+1)
+		line := fmt.Sprintf("'%s/test?k=%d'\n", server.URL, i+1)
 		_, err = buffer.WriteString(line)
 		require.NoError(t, err)
 	}
