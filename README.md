@@ -62,10 +62,10 @@ httpreplay TAPE-FILE [-n NUM] [-q QPS] [-c CONCURRENCY] [-t SECONDS] [-f] [-d] [
 
 | Argument | Description | Default |
 | :--- | :--- | :--- |
-| **--clb-hot-conns-per-host NUM** | [Client-Side Load Balancing](#client-side-load-balancing): minimum number of independent connections actively used per host. | `10` |
-| **--clb-max-conn-age SECONDS** | [Client-Side Load Balancing](#client-side-load-balancing): soft upper bound on how long a connection may be reused, in seconds (float); in-flight requests are allowed to finish. | `300.0` |
-| **--clb-max-conn-age-jitter FRACTION** | [Client-Side Load Balancing](#client-side-load-balancing): jitter fraction in (0.0, 1.0] applied to the maximum connection age; the effective age is drawn uniformly from `[(1-jitter)*max, (1+jitter)*max]`. | `0.5` |
-| **--delivery-semantics SEMANTICS** | Delivery semantics used when resuming after a crash: `at-least-once` or `at-most-once`. See [Delivery Semantics](#delivery-semantics). | `at-least-once` |
+| **--clb-hot-conns-per-host NUM** | Minimum number of independent connections actively used per host.<br>See [Client-Side Load Balancing](#client-side-load-balancing) | `10` |
+| **--clb-max-conn-age SECONDS** | Soft upper bound on how long a connection may be reused, in seconds (float); in-flight requests are allowed to finish.<br>See [Client-Side Load Balancing](#client-side-load-balancing) | `300.0` |
+| **--clb-max-conn-age-jitter FRACTION** | Jitter fraction in (0.0, 1.0] applied to the maximum connection age; the effective age is drawn uniformly from `[(1-jitter)*max, (1+jitter)*max]`.<br>See [Client-Side Load Balancing](#client-side-load-balancing) | `0.5` |
+| **--delivery-semantics SEMANTICS** | Delivery semantics used when resuming after a crash: `at-least-once` or `at-most-once`.<br>See [Delivery Semantics](#delivery-semantics) | `at-least-once` |
 | **--failure-tape-buffer-size BYTES** | Buffer size of the failure tape file, in bytes. Values too small will be raised. | `16777216` |
 | **--sync-to-disk-interval SECONDS** | Interval in seconds (float) for syncing the failure tape and position file to disk. Values too small will be raised. | `0.5` |
 
