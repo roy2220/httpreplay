@@ -89,6 +89,8 @@ The tape file contains **one HTTP request per line**, in a format similar to `cu
 'https://example.com/api/auth' -X GET -H 'Authorization: Bearer token'
 ```
 
+> **Note**: The shell-style tokenizer treats unquoted `&`, `|`, `;`, `<`, and `>` as control operators. Make sure they are quoted or escaped.
+
 -----
 
 ## Quick Start & Examples
