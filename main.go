@@ -16,24 +16,23 @@ import (
 )
 
 func main() {
-	debug := os.Getenv("DEBUG") == "1"
 	exitSignal := make(chan os.Signal, 1)
 	signal.Notify(exitSignal, syscall.SIGINT, syscall.SIGTERM)
 
-	Main(os.Args[1:], os.Stdout, debug, os.Exit, exitSignal)
+	Main(os.Args[1:], os.Stdout, os.Getenv, os.Exit, exitSignal)
 }
 
 // Main is the entry point of the program.
 func Main(
 	rawArgs []string,
 	output io.Writer,
-	debug bool,
+	getenv func(string) string,
 	exit func(int),
 	exitSignal <-chan os.Signal,
 ) {
 	logger := log.New(output, "", log.LstdFlags)
 
-	httpRequester, err := newHttpRequester(mustParseHttpRequesterConfig(rawArgs, output, logger, debug, exit))
+	httpRequester, err := newHttpRequester(mustParseHttpRequesterConfig(rawArgs, output, getenv, exit, logger))
 	if err != nil {
 		logger.Printf("[FATAL] failed to create http requester: %v", err)
 		exit(1)
@@ -83,9 +82,9 @@ func (args) Version() string { return "httpreplay " + version }
 func mustParseHttpRequesterConfig(
 	rawArgs []string,
 	output io.Writer,
-	logger *log.Logger,
-	debug bool,
+	getenv func(string) string,
 	exit func(int),
+	logger *log.Logger,
 ) httpRequesterConfig {
 	var args args
 	var deliverySemantics deliverySemantics
@@ -139,8 +138,10 @@ func mustParseHttpRequesterConfig(
 		DeliverySemantics:       deliverySemantics,
 		FailureTapeBufferSize:   max(args.FailureTapeBufferSize, minFailureTapeBufferSize),
 		SyncToDiskInterval:      max(time.Duration(args.SyncToDiskInterval*float64(time.Second)), minSyncToDiskInterval),
-		DefaultUserAgent:        []string{"httpreplay/" + strings.TrimPrefix(version, "v")},
-		Logger:                  logger,
-		Debug:                   debug,
+
+		DefaultUserAgent: []string{"httpreplay/" + strings.TrimPrefix(version, "v")},
+		Getenv:           getenv,
+		Debug:            getenv("DEBUG") == "1",
+		Logger:           logger,
 	}
 }

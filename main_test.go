@@ -27,6 +27,10 @@ func mockExit(n int) {
 	panic(fmt.Sprintf("exit(%d)", n))
 }
 
+func mockGetenv(env map[string]string) func(string) string {
+	return func(key string) string { return env[key] }
+}
+
 type request struct {
 	Method string
 	Host   string
@@ -75,7 +79,7 @@ func TestGeneral(t *testing.T) {
 '%[1]s/api?v=0'
 -H'X-Foo: Bar' '%[1]s/api?v=1'
 '%[1]s/api?v=2&foo=bar' -X=GET -H 'X-Foo: Bar'  # my comment
-'%[1]s/api?v=3' -H'X-Foo: Bar' --request POST --data='{"key": "value"}' --header 'X-Hello: World' --header='Content-Type: application/json'
+'%[1]s/api?v=3' -H"X-Foo-Bar: ${FOOBAR}" --request POST --data='{"key": "value"}' --header 'X-Hello: World' --header='Content-Type: application/json'
 '%[1]s/api?v=4' -d 'foo=bar'
 '%[1]s/api?v=5' -d 'foo=bar' -d 'key=val' -H 'Host: example.com' -H 'User-Agent: Test'
 
@@ -100,7 +104,7 @@ func TestGeneral(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1", "FOOBAR": "Foo Bar"}),
 		mockExit,
 		nil,
 	)
@@ -148,7 +152,7 @@ func TestGeneral(t *testing.T) {
 		Host:   host,
 		URI:    "/api?v=3",
 		Header: http.Header{
-			"X-Foo":        []string{"Bar"},
+			"X-Foo-Bar":    []string{"Foo Bar"},
 			"X-Hello":      []string{"World"},
 			"Content-Type": []string{"application/json"},
 			"User-Agent":   []string{"httpreplay/(devel)"},
@@ -233,7 +237,7 @@ func TestFollowRedirects(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1"}),
 		mockExit,
 		nil,
 	)
@@ -306,7 +310,7 @@ func TestDryRun(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1"}),
 		mockExit,
 		nil,
 	)
@@ -376,7 +380,7 @@ func TestProgressResumption(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1"}),
 		mockExit,
 		exitSignal,
 	)
@@ -388,7 +392,7 @@ func TestProgressResumption(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1"}),
 		mockExit,
 		nil,
 	)
@@ -400,7 +404,7 @@ func TestProgressResumption(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1"}),
 		mockExit,
 		nil,
 	)
@@ -420,7 +424,7 @@ func TestProgressResumption(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1"}),
 		mockExit,
 		nil,
 	)
@@ -526,7 +530,7 @@ func TestFailureTape(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1"}),
 		mockExit,
 		nil,
 	)
@@ -584,7 +588,7 @@ func TestMaxNumberOfHttpRequests(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1"}),
 		mockExit,
 		nil,
 	)
@@ -616,7 +620,7 @@ func TestBadArgs(t *testing.T) {
 				"/tmp/httpreplay-requests.txt",
 			},
 			out,
-			true,
+			mockGetenv(map[string]string{"DEBUG": "1"}),
 			mockExit,
 			nil,
 		)
@@ -631,7 +635,7 @@ func TestBadArgs(t *testing.T) {
 				"/tmp/httpreplay-requests.txt",
 			},
 			out,
-			true,
+			mockGetenv(map[string]string{"DEBUG": "1"}),
 			mockExit,
 			nil,
 		)
@@ -646,7 +650,7 @@ func TestBadArgs(t *testing.T) {
 				"/tmp/httpreplay-requests.txt",
 			},
 			out,
-			true,
+			mockGetenv(map[string]string{"DEBUG": "1"}),
 			mockExit,
 			nil,
 		)
@@ -661,7 +665,7 @@ func TestBadArgs(t *testing.T) {
 				"/tmp/httpreplay-requests.txt",
 			},
 			out,
-			true,
+			mockGetenv(map[string]string{"DEBUG": "1"}),
 			mockExit,
 			nil,
 		)
@@ -676,7 +680,7 @@ func TestBadArgs(t *testing.T) {
 				"/tmp/httpreplay-requests.txt",
 			},
 			out,
-			true,
+			mockGetenv(map[string]string{"DEBUG": "1"}),
 			mockExit,
 			nil,
 		)
@@ -691,7 +695,7 @@ func TestBadArgs(t *testing.T) {
 				"/tmp/httpreplay-requests.txt",
 			},
 			out,
-			true,
+			mockGetenv(map[string]string{"DEBUG": "1"}),
 			mockExit,
 			nil,
 		)
@@ -706,7 +710,7 @@ func TestBadArgs(t *testing.T) {
 				"/tmp/httpreplay-requests.txt",
 			},
 			out,
-			true,
+			mockGetenv(map[string]string{"DEBUG": "1"}),
 			mockExit,
 			nil,
 		)
@@ -721,7 +725,7 @@ func TestBadArgs(t *testing.T) {
 				"/tmp/httpreplay-requests.txt",
 			},
 			out,
-			true,
+			mockGetenv(map[string]string{"DEBUG": "1"}),
 			mockExit,
 			nil,
 		)
@@ -749,7 +753,7 @@ func TestEmptyTapeFile(t *testing.T) {
 			tapeFilePath,
 		},
 		out,
-		true,
+		mockGetenv(map[string]string{"DEBUG": "1"}),
 		mockExit,
 		nil,
 	)
@@ -792,7 +796,7 @@ func TestLargeTapeFile(t *testing.T) {
 			tapeFilePath,
 		},
 		io.Discard,
-		false,
+		mockGetenv(nil),
 		mockExit,
 		nil,
 	)
@@ -839,7 +843,7 @@ func TestClientSideLoadBalancing(t *testing.T) {
 			tapeFilePath,
 		},
 		io.Discard,
-		false,
+		mockGetenv(nil),
 		mockExit,
 		nil,
 	)
@@ -891,7 +895,7 @@ func TestDeliveryAtLeastOnce(t *testing.T) {
 				tapeFilePath,
 			},
 			io.Discard,
-			false,
+			mockGetenv(nil),
 			mockExit,
 			nil,
 		)
@@ -948,7 +952,7 @@ func TestDeliveryAtMostOnce(t *testing.T) {
 				tapeFilePath,
 			},
 			io.Discard,
-			false,
+			mockGetenv(nil),
 			mockExit,
 			nil,
 		)

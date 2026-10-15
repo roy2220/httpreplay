@@ -85,11 +85,11 @@ The tape file contains **one HTTP request per line**, in a format similar to `cu
 
 ```
 'https://example.com/api/demo?foo=bar'  # Shell-style comments are allowed
+'https://example.com/api/auth' -X GET -H "Authorization: Bearer ${MY_TOKEN}"  # Environment variable expansion is supported
 'https://example.com/api/post' -X POST -H 'Content-Type: application/json' -d '{"key":"value"}'
-'https://example.com/api/auth' -X GET -H 'Authorization: Bearer token'
 ```
 
-> **Note**: The shell-style tokenizer treats unquoted `&`, `|`, `;`, `<`, and `>` as control operators. Make sure they are quoted or escaped.
+> **Note**: The shell-style tokenizer follows basic POSIX shell rules for lexing. Make sure the arguments are properly quoted or escaped.
 
 -----
 

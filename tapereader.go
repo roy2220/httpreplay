@@ -1,17 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
-	"strings"
-	"unsafe"
 
 	"github.com/edsrzf/mmap-go"
 )
 
 type tapeReader struct {
 	mMap        mmap.MMap
-	unreadLines string
+	unreadLines []byte
 }
 
 func newTapeReader(tapeFileName string) (_ *tapeReader, returnedErr error) {
@@ -44,7 +43,7 @@ func newTapeReader(tapeFileName string) (_ *tapeReader, returnedErr error) {
 
 	return &tapeReader{
 		mMap:        mMap,
-		unreadLines: b2s(mMap),
+		unreadLines: mMap,
 	}, nil
 }
 
@@ -52,18 +51,18 @@ func (r *tapeReader) Close() error {
 	if r.mMap == nil {
 		return nil
 	}
-	r.unreadLines = ""
+	r.unreadLines = nil
 	return r.mMap.Unmap()
 }
 
-func (r *tapeReader) ReadLine() (string, bool) {
-	if r.unreadLines == "" {
-		return "", false
+func (r *tapeReader) ReadLine() ([]byte, bool) {
+	var i int
+	if j := bytes.IndexByte(r.unreadLines, '\n'); j >= 0 {
+		i = j + 1
+	} else {
+		i = len(r.unreadLines)
 	}
-	var line string
-	line, r.unreadLines, _ = strings.Cut(r.unreadLines, "\n")
-	line = strings.TrimSuffix(line, "\r")
-	return line, true
+	line := r.unreadLines[:i]
+	r.unreadLines = r.unreadLines[i:]
+	return line, len(line) >= 1
 }
-
-func b2s(b []byte) string { return unsafe.String(unsafe.SliceData(b), len(b)) }

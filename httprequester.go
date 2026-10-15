@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,13 +14,15 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/mattn/go-shellwords"
 	"github.com/roy2220/clbtransport"
+	"github.com/roy2220/shcmd"
 	"go.uber.org/ratelimit"
 )
 
@@ -68,9 +71,11 @@ type httpRequesterConfig struct {
 	DeliverySemantics       deliverySemantics
 	FailureTapeBufferSize   int
 	SyncToDiskInterval      time.Duration
-	DefaultUserAgent        []string
-	Logger                  *log.Logger
-	Debug                   bool
+
+	DefaultUserAgent []string
+	Getenv           func(string) string
+	Debug            bool
+	Logger           *log.Logger
 }
 
 type deliverySemantics int
@@ -214,8 +219,16 @@ func (r *httpRequester) dispatchHttpRequests() {
 		}
 	}()
 
-	parser := shellwords.NewParser()
-	parser.ParseComment = true
+	scanner := shcmd.Scanner{
+		Options: shcmd.Options{
+			ExpandEnvVars: true,
+			Getenv:        r.config.Getenv,
+		},
+	}
+	if isOSGetenv(scanner.Options.Getenv) {
+		// hack for better performance
+		scanner.Options.Getenv = nil
+	}
 
 	skipLine := func(tapePosition int64) {
 		r.stats.skipped.Add(1)
@@ -251,13 +264,14 @@ func (r *httpRequester) dispatchHttpRequests() {
 
 	var numberOfHttpRequests int
 	for tapePosition, line := range r.readTape() {
-		args, err := parser.Parse(line)
+		scanner.SetText(line)
+		args, ok, err := scanner.NextCommand()
 		if err != nil {
 			r.config.Logger.Printf("[WARN] failed to parse args; tapePosition=%v: %v", tapePosition, err)
 			skipLine(tapePosition)
 			continue
 		}
-		if len(args) == 0 {
+		if !ok {
 			skipLine(tapePosition)
 			continue
 		}
@@ -311,10 +325,10 @@ func (r *httpRequester) dispatchHttpRequests() {
 	noMoreHttpRequests = true
 }
 
-func (r *httpRequester) readTape() iter.Seq2[int64, string] {
+func (r *httpRequester) readTape() iter.Seq2[int64, []byte] {
 	lastTapePosition := r.tapePositionTracker.TapePosition()
 
-	return func(yield func(int64, string) bool) {
+	return func(yield func(int64, []byte) bool) {
 		for tapePosition := int64(1); ; tapePosition++ {
 			line, ok := r.tapeReader.ReadLine()
 			if !ok {
@@ -364,7 +378,7 @@ func (r *httpRequester) buildHttpRequest(curlCommand curlCommand) (*http.Request
 	return httpRequest, nil
 }
 
-func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
+func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line []byte) {
 	r.stats.concurrency.Add(1)
 	defer func() {
 		r.stats.concurrency.Add(-1)
@@ -397,8 +411,7 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 		if e := (*url.Error)(nil); errors.As(err, &e) {
 			e.URL = "..."
 		}
-		line = fmt.Sprintf("%v  # ERROR: %v", line, strings.ReplaceAll(err.Error(), "\n", ""))
-		r.recordFailedHttpRequest(line)
+		r.recordFailedHttpRequest("%s  # ERROR: %v\n", bytes.TrimRight(line, "\r\n"), strings.ReplaceAll(err.Error(), "\n", ""))
 		return
 	}
 	io.Copy(io.Discard, resp.Body)
@@ -408,21 +421,18 @@ func (r *httpRequester) doHttpRequest(httpRequest *http.Request, line string) {
 			r.config.Logger.Printf("[DEBUG] %v %q responded exception status code: %v", httpRequest.Method, httpRequest.URL.String(), resp.StatusCode)
 		}
 		r.stats.failed.Add(1)
-		line = fmt.Sprintf("%v  # STATUS CODE: %v", line, resp.StatusCode)
-		r.recordFailedHttpRequest(line)
+		r.recordFailedHttpRequest("%s  # STATUS CODE: %v\n", bytes.TrimRight(line, "\r\n"), resp.StatusCode)
 		return
 	}
 	r.stats.successful.Add(1)
 }
 
-func (r *httpRequester) recordFailedHttpRequest(line string) {
+func (r *httpRequester) recordFailedHttpRequest(format string, a ...any) {
 	r.failureTapeLock.Lock()
-	_, err1 := r.failureTape.WriteString(line)
-	err2 := r.failureTape.WriteByte('\n')
+	_, err := fmt.Fprintf(r.failureTape, format, a...)
 	r.failureTapeIsDirty = true
 	r.failureTapeLock.Unlock()
 
-	err := errors.Join(err1, err2)
 	if err != nil {
 		r.config.Logger.Printf("[WARN] failed to write failure tape file: %v", err)
 	}
@@ -437,10 +447,6 @@ func (r *httpRequester) syncToDiskPeriodically() {
 		case <-r.idleness:
 			next = false
 		case <-ticker.C:
-		}
-
-		if r.config.Debug {
-			r.config.Logger.Print("[DEBUG] syncing to disk...")
 		}
 
 		{
@@ -511,3 +517,7 @@ func (r *httpRequester) logProgress() {
 }
 
 func (r *httpRequester) Idleness() <-chan struct{} { return r.idleness }
+
+func isOSGetenv(f func(string) string) bool {
+	return runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() == "os.Getenv"
+}
