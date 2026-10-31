@@ -5,8 +5,8 @@ go 1.26
 require (
 	github.com/alexflint/go-arg v1.6.0
 	github.com/edsrzf/mmap-go v1.2.0
-	github.com/roy2220/clbtransport v0.3.5
-	github.com/roy2220/shcmd v0.3.0
+	github.com/roy2220/clbtransport v0.4.0
+	github.com/roy2220/shcmd v0.4.0
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/ratelimit v0.3.1
 )

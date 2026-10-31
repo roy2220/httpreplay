@@ -126,9 +126,9 @@ func newHttpRequester(config httpRequesterConfig) (_ *httpRequester, returnedErr
 		}
 	}()
 	transportConfig := clbtransport.TransportConfig{
-		HotConnsPerHost:             config.ClbHotConnsPerHost,
-		ApproximateMaxConnAge:       config.ClbMaxConnAge,
-		ApproximateMaxConnAgeJitter: config.ClbMaxConnAgeJitter,
+		HotConnsPerHost:  config.ClbHotConnsPerHost,
+		MaxConnAge:       config.ClbMaxConnAge,
+		MaxConnAgeJitter: config.ClbMaxConnAgeJitter,
 
 		DialContext: (&net.Dialer{
 			Timeout:   config.RequestTimeout,
@@ -264,7 +264,7 @@ func (r *httpRequester) dispatchHttpRequests() {
 
 	var numberOfHttpRequests int
 	for tapePosition, line := range r.readTape() {
-		scanner.SetText(line)
+		scanner.SetTextBytes(line)
 		args, ok, err := scanner.NextCommand()
 		if err != nil {
 			r.config.Logger.Printf("[WARN] failed to parse args; tapePosition=%v: %v", tapePosition, err)
