@@ -5,7 +5,7 @@
 `httpreplay` is an **efficient, resumable** command-line interface (CLI) tool for replaying HTTP requests from a tape file. It simulates traffic while enforcing configurable **QPS** (queries per second) and **concurrency** limits.
 
 > [!NOTE]
-> Except for the documentation, every line of code is human-crafted. **No AI slop included**.
+> The source code is handcrafted by a human. AI only assisted with docs and tests. No AI slop.
 
 ## Features
 
